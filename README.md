@@ -123,9 +123,45 @@ This batch: keep all product names in original Chinese pinyin.
 
 产出**中文**草稿 JSON（官方 skill 的 layout 草稿形态：`abs`+`xyxy`+16 倍数宽高，或 caption 形态），`text` 字段（画面可见文字）中文原样保留——直接整段粘贴即可，无需英文版、无需备注文件。参考 `examples/example_draft_zh.json`。上游给一段中文散文也行：贴进 source 后用 AI 拆解（⚡拆解）自动生成布局草稿。
 
-## config.json（可选）
+## 默认配置：MiMo Token Plan 与 DeepSeek API
 
-复制 `config.example.json` 为 `config.json` 放本目录，按 provider 存 base_url/model/api_key；widget 值优先于 config。避免把 DeepSeek key 序列化进工作流文件。
+开箱即用的两条线路，二选一或同时配置（`config.json` + provider 下拉切换，也可以直接在节点 widget 里填）：
+
+### MiMo Token Plan（小米 MiMo 套餐）
+
+```json
+{
+  "mimo": {
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.6-flash",
+    "api_key": "tp-你的MiMo套餐密钥"
+  }
+}
+```
+
+- 套餐地址与模型名以套餐文档为准（形如 `https://xxx/v1`、模型名如 `mimo-v2.6-flash`）
+- api_key 用套餐发放的 `tp-` 开头密钥
+- 内网自部署 MiMo 则把 base_url 换成内网地址即可（免鉴权时 api_key 保持 `EMPTY`）
+
+### DeepSeek API
+
+```json
+{
+  "deepseek": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-flash",
+    "api_key": "sk-你的DeepSeek密钥"
+  }
+}
+```
+
+- base_url 留空时 deepseek provider 自动使用官方地址 `https://api.deepseek.com/v1`
+- 模型名留空时默认 `deepseek-chat`（官方别名）；也可显式指定 `deepseek-flash` / `deepseek-v4-pro`
+- 思考强度经 `reasoning_effort` 参数控制（low/medium/high → low/high/max），无需更换模型名
+
+### 通用说明
+
+复制 `config.example.json` 为 `config.json` 放本目录，按 provider 存 base_url/model/api_key；**widget 值优先于 config**；节点顶部的「LLM 配置预设」（💾/🗑）可以把多套线路存成命名预设一键切换。避免把 API key 序列化进工作流文件（工作流里建议保持 `EMPTY`，key 放 config.json 或预设库）。
 
 ## 测试
 

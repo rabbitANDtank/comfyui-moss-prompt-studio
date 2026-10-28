@@ -1,12 +1,12 @@
 {
   "mimo": {
-    "base_url": "http://your-intranet-host:8000/v1",
-    "model": "MiMo",
-    "api_key": "EMPTY"
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+    "model": "mimo-v2.6-flash",
+    "api_key": "tp-put-your-mimo-token-plan-key-here"
   },
   "deepseek": {
     "base_url": "https://api.deepseek.com/v1",
-    "model": "",
+    "model": "deepseek-flash",
     "api_key": "sk-put-your-deepseek-key-here"
   },
   "custom": {}
