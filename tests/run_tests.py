@@ -306,6 +306,46 @@ def _run_translator(base_url):
     )
 
 
+def test_palette_meta_roundtrip():
+    """palette/meta 模块：编译保留、翻译校验 hex 逐字不变、描述色名可译。"""
+    src_draft = copy.deepcopy(DRAFT_ZH)
+    src_draft["summary"]["palette"] = ["#F4EFE6", "#4A3327", "#1F3D2B"]
+    src_draft["items"][0]["palette"] = ["#4A3327"]
+
+    # 1) 草稿校验与编译都接受并保留 palette/meta
+    validate_draft(src_draft)
+    compiled = compile_draft(src_draft)
+    c = json.loads(compiled)
+    assert c["summary"]["palette"] == ["#F4EFE6", "#4A3327", "#1F3D2B"]
+    assert c["summary"]["meta"] == src_draft["summary"]["meta"]
+    assert c["items"][0]["palette"] == ["#4A3327"]
+    assert "width" not in c and "height" not in c
+
+    # 2) 翻译校验：hex 被改动 → 拒绝（大小写不敏感视为相同）
+    from py.sniff import sniff
+    src_info = sniff(json.dumps(src_draft, ensure_ascii=False), 1536, 1024)
+    out_ok = copy.deepcopy(src_draft)
+    out_ok["summary"]["caption"] = "A warm ceramic mug poster."
+    check_translation(src_info, out_ok)  # 原样 hex → 通过
+    out_case = copy.deepcopy(out_ok)
+    out_case["summary"]["palette"] = ["#f4efe6", "#4A3327", "#1F3D2B"]  # 仅大小写不同 → 通过
+    check_translation(src_info, out_case)
+    out_bad = copy.deepcopy(out_ok)
+    out_bad["summary"]["palette"] = ["#FFFFFF", "#4A3327", "#1F3D2B"]  # 颜色被改 → 拒绝
+    _expect(TranslationError, check_translation, src_info, out_bad)
+    out_bad2 = copy.deepcopy(out_ok)
+    out_bad2["items"][0]["palette"] = ["#000000"]
+    _expect(TranslationError, check_translation, src_info, out_bad2)
+
+    # 3) 非 hex 的描述色名允许翻译
+    src2 = copy.deepcopy(src_draft)
+    src2["summary"]["palette"] = ["warm beige", "dark green"]
+    info2 = sniff(json.dumps(src2, ensure_ascii=False), 1536, 1024)
+    out2 = copy.deepcopy(src2)
+    out2["summary"]["palette"] = ["暖米色", "深绿色"]
+    check_translation(info2, out2)
+
+
 def test_agent_md_append_injection():
     """AGENT.md 追加注入（语义移植自 Codex-X Append 模式）：追加而非替换，标记圈定片段。"""
     import tempfile
@@ -528,6 +568,7 @@ TESTS = [
     test_check_translation,
     test_extract_json,
     test_extract_json_repairs,
+    test_palette_meta_roundtrip,
     test_agent_md_append_injection,
     test_agent_md_widget_selection,
     test_resolve_endpoint_and_body,

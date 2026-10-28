@@ -31,6 +31,7 @@ Output the SAME JSON with descriptive text translated into natural, vivid Englis
 Hard rules:
 - Translate ONLY these string values: summary.caption, entries of summary.meta, each item's caption, and entries of item tags/palette.
 - Keep VERBATIM, byte-for-byte, untranslated: every item "text" field (visible on-image wording), all keys, all "label" values, all numbers (width/height/bbox), bbox_coord_space, bbox_format, summary.canvas.
+- Entries of any "palette" array that are hex color codes (like #F4EFE6 or #abc) must be copied EXACTLY unchanged; only translate palette entries that are descriptive color words.
 - Do NOT add, remove, rename or reorder fields or items. The output must contain exactly the same items in the same order with identical bboxes.
 - Do NOT add quality tags or style words that are absent in the source. Do not explain. Do not wrap the output in code fences.
 - Inside JSON string values, never use unescaped double quotes: escape them as \\\" or prefer single quotes / no quotes.
@@ -355,6 +356,17 @@ def extract_json(text: str):
     raise TranslationError("模型输出中找不到 JSON 对象")
 
 
+_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def _check_hex_preserved(src_arr, out_arr, label: str):
+    """palette 数组里的 hex 颜色必须逐字保留（大小写不敏感）；描述色名可正常翻译。"""
+    for i, (a, b) in enumerate(zip(src_arr, out_arr)):
+        if _HEX_RE.match(str(a).strip()):
+            _require(str(b).strip().lower() == str(a).strip().lower(),
+                     f"{label}[{i}] 十六进制颜色被改动: {a} -> {b}")
+
+
 def _require(cond: bool, msg: str):
     if not cond:
         raise TranslationError(msg)
@@ -392,6 +404,8 @@ def check_translation(src_info: dict, out) -> dict:
         if key in s_src:
             _require(isinstance(s_out.get(key), list) and len(s_out[key]) == len(s_src[key]),
                      f"summary.{key} 数组长度与源不一致")
+            if key == "palette":
+                _check_hex_preserved(s_src[key], s_out[key], "summary.palette")
 
     items_src, items_out = src["items"], out["items"]
     _require(isinstance(items_out, list) and len(items_out) == len(items_src),
@@ -415,6 +429,8 @@ def check_translation(src_info: dict, out) -> dict:
             if key in a:
                 _require(isinstance(b.get(key), list) and len(b[key]) == len(a[key]),
                          f"{pre}.{key} 数组长度与源不一致")
+                if key == "palette":
+                    _check_hex_preserved(a[key], b[key], f"{pre}.palette")
     return out
 
 
@@ -458,7 +474,7 @@ Output: a single strict JSON object, raw JSON only, no code fences, no explanati
 Schema and rules:
 - Top-level keys exactly: width, height, bbox_coord_space="abs", bbox_format="xyxy", summary, items.
 - width and height are EXACTLY the given canvas size numbers.
-- summary: {"caption": one-paragraph global scene description in Chinese (keep global style/lighting/mood and any negative requirements such as 无文字/无水印), "meta": short genre tags, "canvas": "single"}.
+- summary: {"caption": one-paragraph global scene description in Chinese (keep global style/lighting/mood and any negative requirements such as 无文字/无水印), "meta": 1-3 short English genre tags, "canvas": "single"}. When the scene has a clear color mood, also add "palette": 2-4 hex colors (e.g. "#F4EFE6").
 - items: 1 to 6 positioned elements that make up the scene (main subjects, key foreground/background objects, any visible text). Do not fragment the scene into more than 6 boxes.
 - Each item: {"label": "object"|"character"|"text", "caption": concrete visual description of that element in Chinese (appearance only; global style/lighting stays in summary), "bbox": [x_min, y_min, x_max, y_max]}.
 - bbox: integer absolute pixels, top-left origin, 0 <= x_min < x_max <= width, 0 <= y_min < y_max <= height. Boxes describe placement, overlaps between elements are allowed.

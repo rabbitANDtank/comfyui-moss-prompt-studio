@@ -1,0 +1,1380 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""把 JSON 布局提示词画成可编辑的画布，并导出提示词。
+
+输入
+  草稿   {width,height,bbox_coord_space:"abs",bbox_format:"xyxy",summary,items}
+         bbox 为 [x1,y1,x2,y2] 像素、左上原点
+  编译稿 {summary,items,bbox_coord_space:"abs_centralized",bbox_format:"yxyx"}
+         bbox 为 [y1,x1,y2,x2] 像素、画布中心原点（编译稿不带画布尺寸，需 --width/--height）
+
+用法
+  python scripts/canvas.py layout.json
+  python scripts/canvas.py layout.json --notes notes.json          # 带中文参考
+  python scripts/canvas.py layout.json --image out.png             # 框叠在出图上
+  python scripts/canvas.py prompt.json --width 1152 --height 1536 -o canvas.html
+
+产出：单文件 HTML。上方是可改的整图描述，中间是画布（可拖动、缩放、增删、调层级），
+右侧是图层面板与字段面板，可撤销/重做，导出 MOSS 提示词、草稿 JSON、Klein 编辑稿。
+
+本脚本不生成图片、不联网。浏览器打开即可，无需服务器。
+"""
+import argparse
+import base64
+import html
+import io as _io
+import json
+import os
+import sys
+
+TEMPLATE = r"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ · JSON 提示词画布</title>
+<style>
+:root{
+  --ink:#14171c; --ink2:#333a45; --dim:#6b7280; --line:#e3e7ee; --line2:#eef1f6;
+  --bg:#f4f6fa; --card:#fff; --blue:#1f5fd0; --violet:#6b4bc4; --green:#1f8f5b;
+  --amber:#a86412; --red:#c0392b;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Microsoft YaHei",sans-serif}
+button,select,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+
+/* ── 顶栏 ── */
+header{position:sticky;top:0;z-index:60;background:rgba(255,255,255,.92);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:10px;padding:10px 18px;flex-wrap:wrap}
+header h1{margin:0;font-size:15.5px;font-weight:650;letter-spacing:.1px}
+.dims{display:flex;align-items:center;gap:4px;flex:0 0 auto;font:12px/1 ui-monospace,Consolas,monospace;color:var(--dim);white-space:nowrap}
+.dims input[type=number]{width:58px;flex:0 0 58px;padding:4px 6px;border:1px solid var(--line);
+  border-radius:6px;background:#fff;text-align:right}
+.sp{flex:1}
+.tb{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.btn{padding:6px 11px;border:1px solid var(--line);background:#fff;border-radius:8px;
+  font-size:12.5px;color:var(--ink2);transition:.15s}
+.btn:hover{border-color:#c9d3e4;background:#fafbfe}
+.btn:disabled{opacity:.38;cursor:not-allowed}
+.btn.pri{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.pri:hover{background:#1b54b8}
+.btn.dan:hover{border-color:#e6b3ac;background:#fdf3f1;color:var(--red)}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:#fff;padding:6px 10px;font-size:12.5px;color:var(--dim)}
+.seg button.on{background:#eef3fd;color:var(--blue);font-weight:600}
+.kbd{font:11px/1 ui-monospace,Consolas,monospace;color:#9aa3b2;border:1px solid var(--line);
+  border-radius:4px;padding:2px 4px}
+
+/* ── 布局 ── */
+main{display:grid;grid-template-columns:minmax(520px,1fr) 392px;gap:0;align-items:start}
+.left{padding:16px 18px 60px;min-width:0}
+.right{border-left:1px solid var(--line);background:#fff;min-height:calc(100vh - 53px);
+  display:flex;flex-direction:column}
+
+/* ── 整图描述 ── */
+.summary{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:13px 15px;margin-bottom:14px;box-shadow:0 14px 40px -34px rgba(20,50,110,.5)}
+.shd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.shd b{font-size:13px}
+.shd span{font-size:11.5px;color:var(--dim)}
+.tagw{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.chip{font:11.5px/1 ui-monospace,Consolas,monospace;color:var(--dim);background:#f6f8fb;
+  border:1px solid var(--line);border-radius:999px;padding:4px 9px}
+.shd .chip.sel{color:var(--blue);border-color:#c9dcff;background:#eef4ff}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fld{display:flex;flex-direction:column;gap:4px;min-width:0}
+.fld>span{font-size:11.5px;color:var(--dim);display:flex;align-items:center;gap:6px}
+.fld>span em{font-style:normal;color:#9aa3b2;font-size:11px}
+textarea,input[type=text],input[type=number],select{
+  width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;
+  font-size:13px;line-height:1.55;resize:vertical;transition:.15s}
+textarea:focus,input:focus,select:focus{outline:none;border-color:#9dc0f5;
+  box-shadow:0 0 0 3px rgba(31,95,208,.1)}
+textarea.mono{font:12.5px/1.6 ui-monospace,Consolas,monospace}
+.mini{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.cnt{font:11px/1 ui-monospace,Consolas,monospace;color:#a3abb8}
+
+/* ── 画布 ── */
+.basetag{display:flex;gap:8px;flex-wrap:wrap;margin:-2px 0 8px}
+.basetag .bt{font:11.5px/1.5 ui-monospace,Consolas,monospace;color:var(--dim);background:#fff;
+  border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+.basetag .bt.warn{color:var(--amber);border-color:#f0dcbb;background:#fdf6ec}
+.cvwrap{position:relative;background:linear-gradient(180deg,#f8fafd,#f2f5fa);border:1px solid var(--line);
+  border-radius:12px;padding:20px;box-shadow:inset 0 1px 0 #fff;
+  min-height:120px}
+.cv{position:relative;margin:0 auto;background:#fff;
+  background-image:linear-gradient(rgba(31,95,208,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(31,95,208,.05) 1px,transparent 1px);
+  background-size:32px 32px;
+  border-radius:4px;overflow:hidden;touch-action:none;user-select:none;
+  box-shadow:0 18px 40px -24px rgba(20,50,110,.4),0 0 0 1px #e8edf5}
+.cv .base{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none;opacity:.98}
+.bx{position:absolute;border:2px solid var(--c);border-radius:4px;cursor:move;
+  background:color-mix(in srgb,var(--c) 8%,transparent)}
+.bx.sel{border-width:2.5px;box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 22%,transparent);
+  background:color-mix(in srgb,var(--c) 14%,transparent)}
+.bx.full{border-style:dashed;border-width:1.5px;background:transparent;opacity:.8;pointer-events:none}
+.bx .tag{position:absolute;left:0;top:0;max-width:78%;max-height:100%;overflow:hidden;
+  padding:5px 8px 6px;background:#fff;border-right:1px solid var(--line2);
+  border-bottom:1px solid var(--line2);border-bottom-right-radius:6px;pointer-events:none}
+.bx.full .tag{top:auto;bottom:6px;left:6px;border:1px solid var(--line2);max-width:300px;border-bottom:0;border-top:1px solid var(--line2);
+  border-radius:0 6px 0 0;background:rgba(255,255,255,.92)}
+.bx.tiny .tag{padding:3px 5px}
+.bx.tiny .r-zh,.bx.tiny .r-en{display:none}
+.bx.small .r-en{display:none}
+.bx .hd{display:flex;align-items:center;gap:5px;margin-bottom:2px}
+.bx .hd b{color:#fff;background:var(--c);font:700 10px/1 ui-monospace,Consolas,monospace;
+  border-radius:999px;padding:3px 6px}
+.bx .hd span{font-size:10.5px;color:var(--c);font-weight:600;letter-spacing:.04em}
+.bx .r-tx{font-size:11.5px;line-height:1.45;color:#1b2430;font-weight:600;white-space:pre-line;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.bx .r-zh{font-size:10.5px;line-height:1.42;color:#4b5563;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.bx .r-en{font-size:9.5px;line-height:1.35;color:#98a2b3;display:none;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.bx.sel .r-en,.bx:hover .r-en{display:-webkit-box}
+.bx:not(.small):not(.tiny) .r-en{display:-webkit-box;-webkit-line-clamp:1}
+.bx .r-tx{-webkit-line-clamp:1}
+.bx.sel .r-tx,.bx:hover .r-tx{-webkit-line-clamp:3}
+.bx .r-zh{-webkit-line-clamp:1}
+.bx.sel .r-zh,.bx:hover .r-zh{-webkit-line-clamp:3}
+.bx .miss{color:#c8ced8;font-style:italic}
+.bx .h{position:absolute;width:10px;height:10px;background:#fff;border:2px solid var(--c);
+  border-radius:2px;opacity:0;transition:.12s}
+.bx:hover .h,.bx.sel .h{opacity:1}
+.bx .h.nw{left:-6px;top:-6px;cursor:nwse-resize}
+.bx .h.ne{right:-6px;top:-6px;cursor:nesw-resize}
+.bx .h.sw{left:-6px;bottom:-6px;cursor:nesw-resize}
+.bx .h.se{right:-6px;bottom:-6px;cursor:nwse-resize}
+.cvhint{display:flex;gap:14px;flex-wrap:wrap;margin-top:9px;font-size:11.5px;color:#9aa3b2}
+.cvhint b{color:var(--dim);font-weight:600}
+
+/* ── 右栏 ── */
+.sec{padding:13px 15px;border-bottom:1px solid var(--line2)}
+.sec>h3{margin:0 0 9px;font-size:12px;color:var(--dim);font-weight:600;
+  letter-spacing:.03em;display:flex;align-items:center;gap:8px}
+.sec>h3 em{font-style:normal;font-size:11px;color:#a9b1bf;font-weight:400}
+.layers{max-height:230px;overflow:auto;margin:0 -4px}
+.lrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;cursor:pointer;
+  font-size:12.5px;color:var(--ink2)}
+.lrow:hover{background:#f7f9fc}
+.lrow.sel{background:#eef4ff;color:#12356e;font-weight:600}
+.lrow .dot{width:8px;height:8px;border-radius:50%;background:var(--c);flex:none}
+.lrow .n{font:11px/1 ui-monospace,Consolas,monospace;color:#a3abb8;width:16px;flex:none}
+.lrow .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--dim);font-weight:400}
+.lrow.sel .p{color:#3a5378}
+.lrow .z{font:10.5px/1 ui-monospace,Consolas,monospace;color:#b6bdc9}
+.znote{margin-top:8px;font-size:11px;line-height:1.6;color:#9aa3b2}
+.dims select{width:84px;flex:0 0 auto;padding:4px 6px;font-size:12px}
+.ovp{margin-top:9px;border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:#fbfcfe}
+.ovh{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dim);margin-bottom:6px}
+.ovh em{font-style:normal;color:#b6bdc9;font-size:11px;margin-left:auto}
+.ovp ul{margin:0 0 7px;padding:0;list-style:none;max-height:118px;overflow:auto}
+.ovp li{font:11px/1.55 ui-monospace,Consolas,monospace;color:#4b5563;padding:2px 0}
+.ovp li.done{color:#93a4b8}
+.ovp .btn{width:100%;font-size:11.5px;padding:5px 8px}
+.ovp.none ul,.ovp.none .btn,.ovp.none .tip{display:none}
+.ovp .tip{font-size:11px;line-height:1.55;color:#9aa3b2;margin:0 0 7px}
+.insp{flex:1;overflow:auto;padding:13px 15px 40px}
+.insp .ihd{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+.insp .ihd b{font:700 11px/1 ui-monospace,Consolas,monospace;color:#fff;background:var(--c,#39414e);
+  border-radius:999px;padding:5px 8px}
+.insp .ihd span{font-size:13px;font-weight:600}
+.f{margin-bottom:11px}
+.f>span{display:block;font-size:11.5px;color:var(--dim);margin-bottom:4px}
+.f>span em{font-style:normal;color:#a9b1bf;font-size:11px}
+.four{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.four input{padding:5px 6px;text-align:center;font:12px/1 ui-monospace,Consolas,monospace}
+.rel{display:flex;gap:6px}
+.rel select{flex:1;min-width:0}
+.rel button{white-space:nowrap;padding:6px 8px;border:1px solid var(--line);background:#fff;
+  border-radius:7px;font-size:11.5px;color:var(--ink2)}
+.rel button:hover{border-color:#c9d3e4;background:#fafbfe}
+.empty{color:#a9b1bf;font-size:12.5px;text-align:center;padding:26px 0}
+
+/* ── 导出 ── */
+.ovl{position:fixed;inset:0;background:rgba(16,22,33,.42);backdrop-filter:blur(3px);
+  display:none;align-items:center;justify-content:center;z-index:100;padding:24px}
+.ovl.on{display:flex}
+.modal{background:#fff;border-radius:14px;width:min(1000px,100%);max-height:90vh;
+  display:flex;flex-direction:column;box-shadow:0 40px 90px -30px rgba(10,25,60,.5)}
+.mhd{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line)}
+.mhd b{font-size:14.5px}
+.tabs{display:flex;gap:4px;margin-left:6px;flex-wrap:wrap}
+.tabs button{border:0;background:transparent;padding:6px 10px;border-radius:7px;
+  font-size:12.5px;color:var(--dim)}
+.tabs button.on{background:#eef4ff;color:var(--blue);font-weight:600}
+.mhd .x{margin-left:auto;border:0;background:transparent;font-size:19px;color:#a9b1bf;line-height:1}
+.mbd{flex:1;overflow:auto;padding:15px 16px}
+.mbd p{margin:0 0 9px;font-size:12.5px;color:var(--dim);line-height:1.65}
+.mbd pre{margin:0;background:#0f172a;color:#d7e2f5;border-radius:10px;padding:13px 14px;
+  font:12px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;
+  max-height:44vh;overflow:auto}
+.mft{display:flex;align-items:center;gap:8px;padding:11px 16px;border-top:1px solid var(--line)}
+.mft .msg{flex:1;font-size:12px;color:var(--dim)}
+.vlist{display:flex;flex-direction:column;gap:4px;margin-top:10px;font-size:12px}
+.vlist .e{color:var(--red)}
+.vlist .w{color:var(--amber)}
+.vlist .ok{color:var(--green)}
+.kln{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.kln label{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--ink2)}
+/* 任务闸门 */
+.kgate{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:9px 11px;
+  border:1px solid var(--line);border-radius:9px;background:#f8fafc;margin-bottom:10px}
+.kgate b{font-size:12.5px;color:var(--ink)}
+.kgate label{font-size:12.5px;color:var(--ink2)}
+.kgate .hint{font-size:11.5px;color:#9aa3b2;width:100%;line-height:1.6}
+.kbox{border:1px solid var(--line);border-radius:9px;padding:10px 11px;margin-bottom:10px;background:#fff}
+.kbox[hidden]{display:none}
+.kbox h4{margin:0 0 7px;font-size:12.5px}
+.kbox .row{display:flex;gap:8px;align-items:center;margin-bottom:7px;flex-wrap:wrap}
+.kbox .row label{font-size:12px;color:var(--ink2)}
+.kfrom{display:flex;flex-direction:column;gap:5px}
+.kfrom .fr{display:flex;gap:7px;align-items:center;font-size:12px}
+.kfrom .fr span{color:var(--ink2);min-width:112px;font:11.5px/1.4 ui-monospace,Consolas,monospace}
+.kfrom select{flex:0 0 auto;min-width:132px}
+table.pmap{width:100%;border-collapse:collapse;margin-top:4px;font-size:12px}
+table.pmap th,table.pmap td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+table.pmap th{background:#f4f7fb;font-weight:600;color:var(--ink2);font-size:11.5px;white-space:nowrap}
+table.pmap td.mono{font:11.5px/1.6 ui-monospace,Consolas,monospace;color:var(--ink)}
+table.pmap input{width:100%;box-sizing:border-box;padding:3px 6px;border:1px solid var(--line);border-radius:5px;
+  font:11.5px/1.5 ui-monospace,Consolas,monospace}
+.pnote{margin-top:7px;font-size:11.5px;line-height:1.65;color:#9aa3b2}
+.pnote b{color:var(--amber)}
+/* 色盘 */
+.palsw{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.palsw .sw{position:relative;width:34px;height:26px;border:1px solid var(--line);border-radius:6px;
+  overflow:hidden;background:#fff;cursor:pointer;flex:0 0 auto}
+.palsw .sw input[type=color]{position:absolute;inset:-6px;width:52px;height:38px;border:0;padding:0;
+  background:none;cursor:pointer}
+.palsw .sw .x{position:absolute;right:0;top:0;width:14px;height:14px;line-height:12px;text-align:center;
+  font-size:11px;color:#fff;background:rgba(20,24,33,.55);cursor:pointer;z-index:2}
+.swadd{padding:4px 9px;border:1px dashed var(--line);border-radius:6px;background:#fff;
+  font-size:12px;color:var(--ink2);cursor:pointer}
+.swadd:hover{border-color:#c9d3e4;background:#fafbfe}
+#panes>*{display:none}
+#panes>*.on{display:block}
+
+/* 窄屏 */
+@media (max-width:1180px){
+  main{grid-template-columns:1fr}
+  .right{border-left:0;border-top:1px solid var(--line)}
+  .sec.layersec{max-height:none}
+  .layers{max-height:170px}
+}
+</style></head>
+<body>
+<header>
+  <h1>__TITLE__</h1>
+  <div class="dims">
+    <span>画布</span>
+    <select id="i_ratio" title="常用比例；换比例会等比外扩画布">
+      <option value="">比例…</option>
+      <option value="1:1">1:1</option>
+      <option value="4:3">4:3</option>
+      <option value="3:4">3:4</option>
+      <option value="3:2">3:2</option>
+      <option value="2:3">2:3</option>
+      <option value="16:9">16:9</option>
+      <option value="9:16">9:16</option>
+      <option value="21:9">21:9</option>
+      <option value="9:21">9:21</option>
+      <option value="2:1">2:1</option>
+      <option value="1:2">1:2</option>
+      <option value="1:8">1:8 条漫</option>
+    </select>
+    <select id="i_mp" title="目标百万像素；与比例一起算分辨率">
+      <option value="0">MP…</option>
+      <option value="1">1 MP</option>
+      <option value="1.5">1.5 MP</option>
+      <option value="2">2 MP</option>
+      <option value="4">4 MP</option>
+    </select>
+    <input id="i_w" type="number" step="16">×<input id="i_h" type="number" step="16">
+    <span class="kbd">16 的倍数</span>
+  </div>
+  <div class="sp"></div>
+  <div class="tb">
+    <button class="btn" id="b_add" title="在画面中央加一个文字框">＋ 加框</button>
+    <button class="btn dan" id="b_del">删除</button>
+    <button class="btn" id="b_undo" title="撤销 Ctrl+Z">↶</button>
+    <button class="btn" id="b_redo" title="重做 Ctrl+Shift+Z">↷</button>
+    <button class="btn" id="b_up" title="往前挪一层（盖住别人）">↑</button>
+    <button class="btn" id="b_down" title="往后挪一层（被别人盖住）">↓</button>
+    <div class="seg" title="导出时 caption 取哪一版">
+      <button data-lang="en" class="on">导出用英文</button>
+      <button data-lang="zh">导出用中文</button>
+    </div>
+    <button class="btn pri" id="b_exp">导出提示词</button>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="summary">
+      <div class="shd">
+        <b>整张图是什么</b><span>summary · 上方这块决定“画面整体”，下面每个框决定“局部”</span>
+        <div class="tagw">
+          <span class="chip" id="c_meta">meta —</span>
+          <span class="chip" id="c_canvas">canvas —</span>
+          <span class="chip" id="c_pal">palette —</span>
+        </div>
+      </div>
+      <div class="two">
+        <label class="fld"><span>caption 英文 <em>参与导出（散文，60–120 词）</em></span>
+          <textarea id="s_cap" rows="2" class="mono"
+            placeholder="A warm still-life poster of a hand-drip coffee set on a dark walnut table…"></textarea>
+          <span class="cnt" id="s_cap_cnt"></span></label>
+        <label class="fld"><span>中文参考 <em>不导出，给自己看／可当导出语言；留空则自动带英文原文</em></span>
+          <textarea id="s_cap_zh" rows="2"
+            placeholder="（留空会自动带入英文原文，可直接在其上改成中文）"></textarea></label>
+      </div>
+      <div class="mini">
+        <label class="fld"><span>meta 体裁标签 <em>逗号分隔</em></span>
+          <input id="s_meta" type="text" placeholder="poster, studio photography"></label>
+        <div class="two">
+          <label class="fld"><span>canvas 画布结构</span>
+            <select id="s_canvas">
+              <option value="single">single 一整幅</option>
+              <option value="multi_panel">multi_panel 多格</option>
+              <option value="collage">collage 拼贴</option>
+            </select></label>
+          <label class="fld"><span>palette 主配色 <em>点色块改色，＋ 加一个，× 删一个</em></span>
+            <div class="palsw" id="pal_sw"></div>
+            <button class="swadd" id="pal_add" type="button">＋ 加一个颜色</button>
+            <input id="s_pal" type="text" placeholder="#F7F4EE, #1F3D2B"></label>
+        </div>
+      </div>
+    </div>
+
+%(basetag)s
+    <div class="cvwrap">
+      <div class="cv" id="cv"></div>
+      <div class="cvhint">
+        <span><b>拖动</b>移动</span><span><b>四角</b>缩放</span>
+        <span><b>双击</b>改这块内容</span><span><b>Del</b>删除</span>
+        <span><b>方向键</b>微移</span><span><b>Ctrl+Z</b>撤销</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="right">
+    <div class="sec layersec">
+      <h3>图层 <em>上面的盖住下面的</em></h3>
+      <div class="layers" id="layers"></div>
+      <div class="znote">这里上下挪动＝改数组顺序，<b>只是编辑器里看着方便</b>；layout 规范没有 z 字段，官方没说它能控制谁盖住谁。</div>
+      <div class="ovp none" id="ovp">
+        <div class="ovh">重叠与前后 <em id="ovh_n">无重叠</em></div>
+        <ul id="ovp_list"></ul>
+        <p class="tip">框重叠了，但前后只能靠 caption 说出来。点下面按钮复制询问单，交给 skill 去写遮挡句。</p>
+        <button class="btn" id="b_ask">复制「前后关系询问单」</button>
+      </div>
+    </div>
+    <div class="insp" id="insp">
+      <div class="ihd"><b id="i_num">#1</b><span id="i_lb">文字</span></div>
+
+      <label class="f"><span>类型 label <em>object 物体 / character 人物 / text 文字</em></span>
+        <select id="f_label">
+          <option value="text">text 文字（要逐字渲染）</option>
+          <option value="object">object 物体</option>
+          <option value="character">character 人物</option>
+        </select></label>
+
+      <div class="f" id="wrap_text"><span>文字内容 text <em>逐字要画出来的字；回车＝换行</em></span>
+        <textarea id="f_text" rows="3" placeholder="晨间手冲"></textarea>
+        <span class="cnt" id="c_text"></span></div>
+
+      <div class="f"><span>外观描述 caption（英文）<em>这块看起来什么样：材质、颜色、字体、笔画</em></span>
+        <textarea id="f_cap" rows="3" class="mono"
+          placeholder="A bone-white ceramic cup with a matte glaze…"></textarea></div>
+
+      <div class="f"><span>中文参考 <em>不导出；导出语言选“中文”时用它；留空则自动带英文原文</em></span>
+        <textarea id="f_zh" rows="2" placeholder="（留空会自动带入英文原文，可直接在其上改成中文）"></textarea></div>
+
+      <div class="f"><span>位置框 bbox <em>[x1,y1,x2,y2] 像素，左上原点</em></span>
+        <div class="four">
+          <input id="f_x1" type="number"><input id="f_y1" type="number">
+          <input id="f_x2" type="number"><input id="f_y2" type="number">
+        </div></div>
+
+      <label class="f"><span>tags <em>可选，逗号分隔</em></span>
+        <input id="f_tags" type="text" placeholder="ceramic, tableware"></label>
+    </div>
+  </aside>
+</main>
+
+<div class="ovl" id="ovl">
+  <div class="modal">
+    <div class="mhd">
+      <b>导出</b>
+      <div class="tabs" id="tabs">
+        <button data-tab="moss" class="on">MOSS 提示词</button>
+        <button data-tab="draft">草稿 JSON</button>
+        <button data-tab="klein">Klein 编辑稿</button>
+        <button data-tab="notes">中文参考</button>
+      </div>
+      <button class="x" id="mclose">×</button>
+    </div>
+    <div class="mbd" id="panes">
+      <div data-pane="moss" class="on">
+        <p>单行 JSON，直接贴进 ComfyUI 的 <b>CLIPTextEncode</b> 正向框。坐标已换成“画布中心原点 + yxyx”。</p>
+        <pre id="out_moss"></pre>
+        <div class="vlist" id="vlist"></div>
+      </div>
+      <div data-pane="draft">
+        <p>你正在改的这份草稿。先存下来，或交给 skill 继续调整（下次 <code>canvas.py draft.json</code> 能直接打开）。</p>
+        <pre id="out_draft"></pre>
+      </div>
+      <div data-pane="klein">
+        <p>给 Klein 的“框内编辑”标注：指令段 + 一个空格 + 一张表。坐标换成 0–1000、左上原点、<code>[y,x,y,x]</code>，文字框自动留 8 单位。</p>
+        <div class="kgate">
+          <b>这张稿是什么任务？</b>
+          <label><input type="radio" name="ktask" value="t2i" checked> 文生图（从零新建）</label>
+          <label><input type="radio" name="ktask" value="edit"> 图像编辑（改已有图）</label>
+          <span class="hint">Klein 编辑稿<b>只在“图像编辑”时用</b>。文生图请直接用「MOSS 提示词」页签。
+            认不出是哪种任务时就该先问清楚，不要凭猜输出 Klein。</span>
+        </div>
+        <div class="kbox" id="k_t2i_note">
+          <p class="pnote" style="margin:0">当前是<b>文生图</b>：这份 layout 是给 MOSS 从零生成的，<b>不需要 Klein 编辑稿</b>。
+            去「MOSS 提示词」页签取提示词。只有拿着一张已有图去改字／换物／挪位／删东西时，才切成「图像编辑」。</p>
+        </div>
+        <div class="kbox" id="k_editbox" hidden>
+          <h4>参考图与端口</h4>
+          <div class="row">
+            <label>参考图张数 <input id="k_nref" type="number" min="1" max="4" value="1" style="width:64px"></label>
+            <label>端口前缀 <input id="k_port" type="text" value="ref_images.ref_image_" style="width:200px"></label>
+          </div>
+          <div class="row"><label>每一块来自哪张图（target＝本次新造，不接参考图）：</label></div>
+          <div class="kfrom" id="k_from"></div>
+          <div class="f" style="margin-top:9px"><span>指令段 <em>英文；第一次提到某对象要带 &lt;id&gt;，每个 id 恰好出现一次</em></span>
+            <textarea id="k_ins" rows="2" class="mono"
+              placeholder="Change the speech bubble to 'moss-image真的还不错哦'. Everything else stays identical to the source."></textarea></div>
+          <div style="margin-top:6px"><span class="kbd" id="k_ids"></span></div>
+        </div>
+        <pre id="out_klein"></pre>
+        <div id="k_pmap"></div>
+      </div>
+      <div data-pane="notes">
+        <p>中文参考单独存一份（官方编译器不认这些字段）。下次用 <code>--notes</code> 传进来即可恢复。</p>
+        <pre id="out_notes"></pre>
+      </div>
+    </div>
+    <div class="mft">
+      <span class="msg" id="mmsg"></span>
+      <button class="btn" id="bcopy">复制</button>
+      <button class="btn" id="bdl">下载</button>
+      <button class="btn pri" id="bdone">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const RAW = __LAYOUT__;
+const NOTES = __NOTES__;
+const IMG = __IMAGE__;
+const ZH = {object:'物体', character:'人物', text:'文字'};
+const COLOR = {object:'#6b4bc4', character:'#1f8f5b', text:'#1f5fd0'};
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const $ = s => document.querySelector(s);
+const arr = v => Array.isArray(v) ? v.filter(x => String(x).trim() !== '')
+  : String(v || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+
+let S, sel = 0, undoStack = [], redoStack = [], preEdit = null, expLang = 'en';
+
+/* ────────── 载入 ────────── */
+function buildState(raw, notes) {
+  const W = raw.width || __W__, H = raw.height || __H__;
+  const space = raw.bbox_coord_space || 'abs';
+  const rawItems = raw.items || raw.elements || [];
+  const items = rawItems.map((it, i) => {
+    let b = (it.bbox || [0, 0, 1, 1]).slice(0, 4).map(Number);
+    if (space === 'abs_centralized') {           // [y1,x1,y2,x2] 中心原点 → 左上原点
+      const [y1, x1, y2, x2] = b;
+      b = [x1 + W / 2, y1 + H / 2, x2 + W / 2, y2 + H / 2];
+    }
+    return {
+      label: it.label || it.type || 'object',
+      text: it.text || '',
+      caption: it.caption || it.identity || '',
+      caption_zh: (notes.items && notes.items[i] && notes.items[i].caption_zh) || it.caption_zh || '',
+      tags: arr(it.tags), palette: arr(it.palette),
+      bbox: b.map(v => Math.round(v))
+    };
+  });
+  const sm = raw.summary || { caption: raw.gen_brief || '' };
+  return {
+    width: W, height: H,
+    summary: {
+      caption: sm.caption || '',
+      caption_zh: notes.summary_zh || sm.caption_zh || '',
+      meta: arr(sm.meta || (raw.scene_type ? [raw.scene_type] : [])),
+      canvas: sm.canvas || 'single',
+      palette: arr(sm.palette)
+    },
+    items: items
+  };
+}
+
+/* ────────── 历史 ────────── */
+const snap = () => JSON.stringify(S);
+function pushUndo() {
+  undoStack.push(snap());
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack = [];
+  updateBtns();
+}
+function restore(str) { S = JSON.parse(str); sel = Math.min(sel, S.items.length - 1); if (sel < 0) sel = 0; drawAll(); }
+function undo() { if (!undoStack.length) return; redoStack.push(snap()); restore(undoStack.pop()); }
+function redo() { if (!redoStack.length) return; undoStack.push(snap()); restore(redoStack.pop()); }
+
+/* ────────── 画布 ────────── */
+const cv = $('#cv');
+function fitCanvas() {
+  const wrap = cv.parentElement;
+  const availW = wrap.parentElement.clientWidth - 40;
+  const availH = Math.max(420, window.innerHeight - wrap.getBoundingClientRect().top - 92);
+  let w = availW, h = w * S.height / S.width;
+  if (h > availH) { h = availH; w = h * S.width / S.height; }
+  const minW = Math.min(availW, 620);            // 太小就看不清标签，宁可让页面滚动
+  if (w < minW) { w = minW; h = w * S.height / S.width; }
+  cv.style.width = Math.round(w) + 'px';
+  cv.style.height = Math.round(h) + 'px';
+}
+
+function tagHTML(it, i) {
+  const zh = it.caption_zh ? esc(it.caption_zh) : '<span class="miss">中文参考＝英文原文（未译）</span>';
+  const en = it.caption ? esc(it.caption) : '<span class="miss">英文描述未填</span>';
+  const tx = it.label === 'text'
+    ? '<div class="r-tx">' + (it.text ? esc(it.text) : '<span class="miss">未填文字</span>') + '</div>'
+    : '';
+  return '<div class="tag"><div class="hd"><b>' + (i + 1) + '</b><span>' + (ZH[it.label] || it.label) + '</span></div>'
+    + tx + '<div class="r-zh">' + zh + '</div><div class="r-en">' + en + '</div></div>';
+}
+
+function paintBox(d, it, i) {
+  const [x1, y1, x2, y2] = it.bbox;
+  const bw = x2 - x1, bh = y2 - y1;
+  const full = bw >= S.width * 0.94 && bh >= S.height * 0.94;
+  const tiny = bw < 210 || bh < 88;
+  const small = bw < 430 || bh < 175;
+  d.className = 'bx' + (i === sel ? ' sel' : '') + (full ? ' full' : '')
+    + (tiny ? ' tiny' : small ? ' small' : '');
+  d.style.left = (x1 / S.width * 100) + '%';
+  d.style.top = (y1 / S.height * 100) + '%';
+  d.style.width = (bw / S.width * 100) + '%';
+  d.style.height = (bh / S.height * 100) + '%';
+  d.style.zIndex = i === sel ? 999 : 10 + i;
+  d.style.setProperty('--c', COLOR[it.label] || '#39414e');
+  d.innerHTML = tagHTML(it, i)
+    + ['nw', 'ne', 'sw', 'se'].map(k => '<i class="h ' + k + '" data-h="' + k + '"></i>').join('');
+}
+
+function drawCanvas() {
+  fitCanvas();
+  cv.innerHTML = '';
+  if (IMG) { const im = document.createElement('img'); im.className = 'base'; im.src = IMG; cv.appendChild(im); }
+  S.items.forEach((it, i) => {
+    const d = document.createElement('div');
+    d.dataset.i = i;
+    paintBox(d, it, i);
+    cv.appendChild(d);
+    bindPointer(d, i);
+  });
+}
+
+function updateBox(i) {
+  const d = cv.querySelector('.bx[data-i="' + i + '"]');
+  if (d) paintBox(d, S.items[i], i);
+}
+
+function clampBox(b) {
+  let [x1, y1, x2, y2] = b;
+  const w = x2 - x1, h = y2 - y1;
+  x1 = Math.max(0, Math.min(S.width - w, x1)); y1 = Math.max(0, Math.min(S.height - h, y1));
+  return [Math.round(x1), Math.round(y1), Math.round(x1 + w), Math.round(y1 + h)];
+}
+
+function bindPointer(d, i) {
+  d.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const handle = e.target.dataset.h || '';
+    select(i);
+    startTransform(i, e, handle);
+  });
+  d.addEventListener('dblclick', e => {
+    e.preventDefault();
+    if (S.items[i].label === 'text') { $('#f_text').focus(); $('#f_text').select(); }
+    else { $('#f_cap').focus(); }
+  });
+}
+
+function startTransform(i, e, handle) {
+  const rect = cv.getBoundingClientRect();
+  const kx = S.width / rect.width, ky = S.height / rect.height;
+  const b = S.items[i].bbox.slice();
+  const sx = e.clientX, sy = e.clientY;
+  let dirty = false;
+  const move = ev => {
+    const dx = (ev.clientX - sx) * kx, dy = (ev.clientY - sy) * ky;
+    if (!dx && !dy) return;
+    if (!dirty) { pushUndo(); dirty = true; }   // 只在真的动过之后才记一步
+    if (!handle) {
+      S.items[i].bbox = clampBox([b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy]);
+    } else {
+      let [x1, y1, x2, y2] = b;
+      if (handle.indexOf('w') >= 0) x1 = Math.max(0, Math.min(b[2] - 10, b[0] + dx));
+      if (handle.indexOf('e') >= 0) x2 = Math.min(S.width, Math.max(b[0] + 10, b[2] + dx));
+      if (handle.indexOf('n') >= 0) y1 = Math.max(0, Math.min(b[3] - 10, b[1] + dy));
+      if (handle.indexOf('s') >= 0) y2 = Math.min(S.height, Math.max(b[1] + 10, b[3] + dy));
+      S.items[i].bbox = [x1, y1, x2, y2].map(v => Math.round(v));
+    }
+    updateBox(i); syncBoxInputs(i);
+  };
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    drawAll();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
+/* ────────── 图层 ────────── */
+function drawLayers() {
+  const box = $('#layers');
+  box.innerHTML = '';
+  S.items.map((it, i) => ({ it, i })).reverse().forEach(({ it, i }) => {
+    const row = document.createElement('div');
+    row.className = 'lrow' + (i === sel ? ' sel' : '');
+    const preview = it.label === 'text'
+      ? (it.text || '（无文字）').replace(/\n/g, ' / ')
+      : (it.caption_zh || it.caption || '（无描述）');
+    row.innerHTML = '<span class="dot" style="--c:' + (COLOR[it.label] || '#39414e') + '"></span>'
+      + '<span class="n">' + (i + 1) + '</span>'
+      + '<span class="p">' + esc(preview).slice(0, 60) + '</span>'
+      + '<span class="z">' + (i + 1) + '/' + S.items.length + '</span>';
+    row.onclick = () => { select(i); };
+    box.appendChild(row);
+  });
+}
+
+/* ────────── 选择 ────────── */
+function select(i) {
+  sel = i;
+  cv.querySelectorAll('.bx').forEach(n => n.classList.toggle('sel', Number(n.dataset.i) === i));
+  cv.querySelectorAll('.bx').forEach(n => n.style.zIndex = 10 + Number(n.dataset.i));
+  drawLayers(); drawInspector(); updateBtns();
+}
+
+/* ────────── 字段面板 ────────── */
+function drawInspector() {
+  const it = S.items[sel];
+  const insp = $('#insp');
+  if (!it) { insp.querySelectorAll('input,textarea,select,button').forEach(n => n.disabled = true);
+    $('#i_num').textContent = '—'; $('#i_lb').textContent = '没有选中元素'; return; }
+  insp.querySelectorAll('input,textarea,select,button').forEach(n => n.disabled = false);
+  $('#i_num').textContent = '#' + (sel + 1);
+  $('#i_num').style.setProperty('--c', COLOR[it.label] || '#39414e');
+  $('#i_lb').textContent = ZH[it.label] || it.label;
+  $('#f_label').value = it.label;
+  $('#f_text').value = it.text;
+  $('#f_cap').value = it.caption;
+  $('#f_zh').value = zhFill(it);
+  $('#f_x1').value = it.bbox[0]; $('#f_y1').value = it.bbox[1];
+  $('#f_x2').value = it.bbox[2]; $('#f_y2').value = it.bbox[3];
+  $('#f_tags').value = it.tags.join(', ');
+  $('#wrap_text').style.display = it.label === 'text' ? '' : 'none';
+  $('#c_text').textContent = it.label === 'text' ? (it.text.length + ' 字 / ' + (it.text.split('\n').length) + ' 行') : '';
+
+}
+
+function syncBoxInputs(i) {
+  const it = S.items[i]; if (!it) return;
+  if (document.activeElement !== $('#f_x1')) $('#f_x1').value = it.bbox[0];
+  if (document.activeElement !== $('#f_y1')) $('#f_y1').value = it.bbox[1];
+  if (document.activeElement !== $('#f_x2')) $('#f_x2').value = it.bbox[2];
+  if (document.activeElement !== $('#f_y2')) $('#f_y2').value = it.bbox[3];
+}
+
+/* 中文参考：没翻译时直接把英文原文带进输入框，别空着给示例 */
+function zhFill(o) { return o._zhT ? o.caption_zh : (o.caption_zh || o.caption || ''); }
+function normHex(c) {
+  c = String(c || '').trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c;
+  if (/^#[0-9a-fA-F]{3}$/.test(c)) return '#' + c.slice(1).split('').map(ch => ch + ch).join('');
+  return null;
+}
+function renderPalette() {
+  const host = $('#pal_sw'); if (!host) return;
+  host.innerHTML = '';
+  S.summary.palette.forEach((c, i) => {
+    const d = document.createElement('div'); d.className = 'sw';
+    const inp = document.createElement('input');
+    inp.type = 'color'; inp.value = normHex(c) || '#888888';
+    inp.title = c + '（点一下改色）';
+    inp.oninput = e => { S.summary.palette[i] = e.target.value; syncPalText(); };
+    inp.onchange = () => { pushUndo(); drawSummary(); refreshExport(); };
+    const x = document.createElement('span'); x.className = 'x'; x.textContent = '×';
+    x.title = '删掉这个颜色';
+    x.onclick = ev => { ev.stopPropagation(); pushUndo(); S.summary.palette.splice(i, 1); drawSummary(); refreshExport(); };
+    d.appendChild(inp); d.appendChild(x); host.appendChild(d);
+  });
+}
+function syncPalText() {
+  const el = $('#s_pal'); if (el && document.activeElement !== el) el.value = S.summary.palette.join(', ');
+}
+
+function drawSummary() {
+  const sm = S.summary;
+  if (document.activeElement !== $('#s_cap')) $('#s_cap').value = sm.caption;
+  if (document.activeElement !== $('#s_cap_zh')) $('#s_cap_zh').value = zhFill(sm);
+  if (document.activeElement !== $('#s_meta')) $('#s_meta').value = sm.meta.join(', ');
+  if (document.activeElement !== $('#s_pal')) $('#s_pal').value = sm.palette.join(', ');
+  renderPalette();
+  $('#s_canvas').value = sm.canvas || 'single';
+  if (document.activeElement !== $('#i_w')) $('#i_w').value = S.width;
+  if (document.activeElement !== $('#i_h')) $('#i_h').value = S.height;
+  $('#c_meta').textContent = 'meta ' + (sm.meta.length ? sm.meta.join(' / ') : '—');
+  $('#c_canvas').textContent = 'canvas ' + (sm.canvas || '—');
+  $('#c_pal').textContent = 'palette ' + (sm.palette.length ? sm.palette.join(' ') : '—');
+  $('#s_cap_cnt').textContent = sm.caption.trim().length + ' 字符 · ' + sm.caption.trim().split(/\s+/).filter(Boolean).length + ' 词';
+}
+
+function drawAll() {
+  if (sel >= S.items.length) sel = S.items.length - 1;
+  if (sel < 0) sel = 0;
+  drawSummary(); drawCanvas(); drawLayers(); drawInspector(); drawOverlaps();
+  updateBtns(); refreshExport();
+}
+
+/* ────────── 按钮状态 ────────── */
+function updateBtns() {
+  $('#b_undo').disabled = !undoStack.length;
+  $('#b_redo').disabled = !redoStack.length;
+  $('#b_del').disabled = !S.items.length;
+  $('#b_up').disabled = sel <= 0;
+  $('#b_down').disabled = sel >= S.items.length - 1;
+}
+
+/* ────────── 编辑动作 ────────── */
+function addItem() {
+  pushUndo();
+  const w = Math.round(S.width * 0.36), h = Math.round(S.height * 0.1);
+  S.items.push({
+    label: 'text', text: '新文字',
+    caption: 'A short Chinese line set in a clean heavy sans-serif, centered and comfortably legible.',
+    caption_zh: '一行简洁的中文，粗体无衬线，居中排版',
+    tags: [], palette: [],
+    bbox: [Math.round((S.width - w) / 2), Math.round((S.height - h) / 2),
+           Math.round((S.width + w) / 2), Math.round((S.height + h) / 2)]
+  });
+  sel = S.items.length - 1;
+  drawAll();
+  $('#f_text').focus(); $('#f_text').select();
+}
+
+function delItem() {
+  if (!S.items.length) return;
+  pushUndo();
+  S.items.splice(sel, 1);
+  sel = Math.max(0, sel - 1);
+  drawAll();
+}
+
+function moveZ(delta) {
+  const j = sel + delta;
+  if (j < 0 || j >= S.items.length) return;
+  pushUndo();
+  const t = S.items[sel]; S.items[sel] = S.items[j]; S.items[j] = t;
+  sel = j; drawAll();
+}
+
+/* ────────── 重叠检测 + 前后闸门 ──────────
+   官方 layout 没有 z 字段：遮挡只能写成 caption 里的句子。
+   所以这里不做「点一下就完事」的按钮（自动取的名字在多人构图里会退化成同一个模糊指代），
+   改成闸门：检出重叠 → 生成询问单 → 交给 skill 逐条定前后并写句子。 */
+/* 铺满画布的底：它和谁都"重叠"，但不构成需要定前后的关系 */
+function isGround(it) {
+  const b = it.bbox;
+  return (b[2] - b[0]) >= S.width * 0.9 && (b[3] - b[1]) >= S.height * 0.9;
+}
+const contains = (a, b) => a[0] <= b[0] && a[1] <= b[1] && a[2] >= b[2] && a[3] >= b[3];
+
+function pairsOverlap() {
+  const out = [];
+  for (let i = 0; i < S.items.length; i++) {
+    for (let j = i + 1; j < S.items.length; j++) {
+      const A = S.items[i], B = S.items[j], a = A.bbox, b = B.bbox;
+      if (isGround(A) || isGround(B)) continue;        // 底不参与
+      if (contains(a, b) || contains(b, a)) continue;  // 整块包住＝上层是谁不用问
+      const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+      const x2 = Math.min(a[2], b[2]), y2 = Math.min(a[3], b[3]);
+      if (x2 - x1 > 0 && y2 - y1 > 0)
+        out.push({ i: i, j: j, rect: [x1, y1, x2, y2], area: (x2 - x1) * (y2 - y1) });
+    }
+  }
+  return out.sort((p, q) => q.area - p.area);
+}
+
+// 遮挡句没有唯一写法，放宽匹配：in front of / behind / occlude / hidden
+function hasOcc(it) { return /in front of|behind|occlud|hidden/i.test(it.caption || ''); }
+
+function nameOf(k) {
+  const it = S.items[k];
+  const sig = (it.caption_zh || it.caption || '').replace(/[，。；、].*$/, '');
+  return '#' + (k + 1) + ' ' + (ZH[it.label] || it.label) + (sig ? '（' + sig.slice(0, 14) + '）' : '');
+}
+
+function drawOverlaps() {
+  const ps = pairsOverlap(), list = $('#ovp_list');
+  list.innerHTML = '';
+  $('#ovh_n').textContent = ps.length ? ps.length + ' 对重叠' : '无重叠';
+  $('#ovp').classList.toggle('none', !ps.length);
+  ps.forEach(p => {
+    const done = hasOcc(S.items[p.i]) || hasOcc(S.items[p.j]);
+    const li = document.createElement('li');
+    li.className = done ? 'done' : '';
+    li.textContent = (done ? '✓ ' : '? ') + nameOf(p.i) + ' × ' + nameOf(p.j)
+      + '  ' + (p.rect[2] - p.rect[0]) + '×' + (p.rect[3] - p.rect[1]);
+    list.appendChild(li);
+  });
+}
+
+function askText() {
+  const ps = pairsOverlap();
+  if (!ps.length) return '没有重叠的框，不需要定前后。';
+  const L = ['【前后关系询问单】画布 ' + S.width + '×' + S.height + '（layout 提示词）',
+    '以下框两两重叠，请逐条给出「谁在前 / 谁在后」，并把遮挡句写进各自 caption：'];
+  ps.forEach((p, n) => {
+    L.push((n + 1) + '. ' + nameOf(p.i) + ' × ' + nameOf(p.j)
+      + '   重叠区间 x ' + p.rect[0] + '-' + p.rect[2] + ', y ' + p.rect[1] + '-' + p.rect[3]);
+  });
+  L.push('', '说明：layout 规范没有 z 字段，遮挡只能写成 caption 里的句子（谁在前、挡住谁的哪一部分）。',
+    '写句子时指代一律用方位短语（the bust above it / the bust on its right / the central bust），',
+    '不要复用 caption 开头的词——多人构图里那样会退化成同一个模糊指代。',
+    '写好后把草稿 JSON 交回来，本画布能直接打开。');
+  return L.join('\n');
+}
+
+/* ────────── 比例 / 百万像素 → 分辨率 ────────── */
+const RATIOS = {'1:1': [1, 1], '4:3': [4, 3], '3:4': [3, 4], '3:2': [3, 2], '2:3': [2, 3],
+  '16:9': [16, 9], '9:16': [9, 16], '21:9': [21, 9], '9:21': [9, 21],
+  '2:1': [2, 1], '1:2': [1, 2], '1:8': [1, 8]};
+
+function sizeOf(rk, mp) {
+  const r = RATIOS[rk];
+  if (!r) return null;
+  const px = (mp > 0 ? mp : S.width * S.height / 1e6) * 1e6;
+  let H = Math.sqrt(px * r[1] / r[0]), W = px / H;
+  W = Math.max(16, Math.round(W / 16) * 16);
+  H = Math.max(16, Math.round(H / 16) * 16);
+  return [W, H];
+}
+
+function resizeTo(W, H) {
+  if (W === S.width && H === S.height) return;
+  pushUndo();
+  const kx = W / S.width, ky = H / S.height;      // 外扩画布：框等比跟着走
+  S.items.forEach(it => {
+    it.bbox = [Math.round(it.bbox[0] * kx), Math.round(it.bbox[1] * ky),
+               Math.round(it.bbox[2] * kx), Math.round(it.bbox[3] * ky)];
+  });
+  S.width = W; S.height = H;
+  drawAll();
+}
+
+function applyPreset() {
+  const dim = sizeOf($('#i_ratio').value, Number($('#i_mp').value));
+  if (dim) resizeTo(dim[0], dim[1]);
+}
+
+/* ────────── 校验 / 编译 ────────── */
+function capOf(o) {
+  const en = (o.caption || '').trim(), zh = (o.caption_zh || '').trim();
+  return expLang === 'zh' ? (zh || en) : (en || zh);
+}
+
+function validate() {
+  const E = [], Wn = [];
+  if (!Number.isInteger(S.width) || S.width <= 0 || S.width % 16) E.push('画布宽度必须是 16 的正整数倍');
+  if (!Number.isInteger(S.height) || S.height <= 0 || S.height % 16) E.push('画布高度必须是 16 的正整数倍');
+  if (!capOf(S.summary)) E.push('summary.caption 为空：这里要写“整张图是什么”');
+  if (!S.items.length) E.push('items 为空：至少给一个元素');
+  S.items.forEach((it, i) => {
+    const n = '#' + (i + 1);
+    if (!capOf(it)) E.push(n + ' 的 caption 为空（每块都必须描述它长什么样）');
+    if (it.label === 'text' && !it.text.trim()) E.push(n + ' 是文字块，但 text 为空');
+    const [x1, y1, x2, y2] = it.bbox;
+    if (!(x1 < x2 && y1 < y2)) E.push(n + ' 的框宽高必须为正');
+    if (x1 < 0 || y1 < 0 || x2 > S.width || y2 > S.height) E.push(n + ' 的框超出画布');
+    if (it.label === 'text' && (y2 - y1) < 24) Wn.push(n + ' 框高只有 ' + (y2 - y1) + 'px，字会很小');
+    if (it.label === 'text' && it.text.length > 200) Wn.push(n + ' 有 ' + it.text.length + ' 字，单块过多容易糊');
+  });
+  if (S.items.length > 24) Wn.push('元素 ' + S.items.length + ' 个，偏多；文字块越碎越难渲染');
+  const un = pairsOverlap().filter(p => !(hasOcc(S.items[p.i]) || hasOcc(S.items[p.j])));
+  if (un.length) Wn.push(un.length + ' 对框重叠且没写前后关系 → 右侧「重叠与前后」复制询问单');
+  if (!S.items.some(it => it.bbox[0] <= 0 && it.bbox[1] <= 0
+    && it.bbox[2] >= S.width && it.bbox[3] >= S.height)) Wn.push('没有铺满全画布的背景元素，背景可能由模型自己编');
+  return { E, Wn };
+}
+
+function centered(box) {
+  const [x1, y1, x2, y2] = box, W = S.width, H = S.height;
+  return [Math.floor(y1) - Math.floor(H / 2), Math.floor(x1) - Math.floor(W / 2),
+          Math.ceil(y2) - Math.floor(H / 2), Math.ceil(x2) - Math.floor(W / 2)];
+}
+
+function cleanItem(it) {
+  const o = { label: it.label, caption: capOf(it) };
+  if (it.label === 'text' || it.text) o.text = it.text;
+  if (it.tags.length) o.tags = it.tags;
+  if (it.palette.length) o.palette = it.palette;
+  o.bbox = it.bbox.slice();
+  return o;
+}
+
+function draftObj() {
+  const sm = { caption: capOf(S.summary) };
+  if (S.summary.meta.length) sm.meta = S.summary.meta;
+  if (S.summary.canvas) sm.canvas = S.summary.canvas;
+  if (S.summary.palette.length) sm.palette = S.summary.palette;
+  return {
+    width: S.width, height: S.height,
+    bbox_coord_space: 'abs', bbox_format: 'xyxy',
+    summary: sm, items: S.items.map(cleanItem)
+  };
+}
+
+function compiledObj() {
+  const d = draftObj();
+  const items = d.items.map(it => {
+    const o = { label: it.label, caption: it.caption };
+    if (it.text) o.text = it.text;
+    if (it.tags) o.tags = it.tags;
+    if (it.palette) o.palette = it.palette;
+    o.bbox = centered(it.bbox);
+    return o;
+  });
+  return { summary: d.summary, items: items,
+    bbox_coord_space: 'abs_centralized', bbox_format: 'yxyx' };
+}
+
+/* Klein：0–1000 左上原点，[y,x,y,x]；文字框留 8 单位 */
+const CJK = /[\u4e00-\u9fff]/;
+let kTask = 't2i';          // 't2i' 文生图 | 'edit' 图像编辑
+let kFrom = {};             // 元素下标 -> 'target' | 'ref_image_N'
+
+function kRefN() {
+  const el = $('#k_nref');
+  if (!el) return 1;
+  const n = parseInt(el.value, 10);
+  return isNaN(n) ? 1 : Math.min(4, Math.max(1, n));
+}
+function kFromOf(i) {
+  if (kTask !== 'edit') return 'target';
+  const v = kFrom[i];
+  if (typeof v === 'string' && v.indexOf('ref_image_') === 0) {
+    const n = parseInt(v.slice('ref_image_'.length), 10);
+    if (!isNaN(n) && n >= 0 && n < kRefN()) return v;
+    return 'ref_image_0';
+  }
+  return 'target';
+}
+/* 每行选“来自哪张图” */
+function renderKFrom() {
+  const box = $('#k_from'); if (!box) return;
+  box.innerHTML = '';
+  S.items.forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'fr';
+    const nm = document.createElement('span');
+    nm.textContent = '#' + (i + 1) + ' ' + (ZH[it.label] || it.label)
+      + (it.label === 'text' && it.text ? '「' + it.text.replace(/\n/g, ' ').slice(0, 10) + '」' : '');
+    const sel = document.createElement('select');
+    const cur = kFromOf(i);
+    ['target'].concat(Array.from({ length: kRefN() }, (_, n) => 'ref_image_' + n)).forEach(v => {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v === 'target' ? 'target（本次新造）' : v + '（第 ' + (n2(v) + 1) + ' 张参考图）';
+      if (v === cur) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = e => { kFrom[i] = e.target.value; renderPmap(); refreshExport(); };
+    row.appendChild(nm); row.appendChild(sel);
+    box.appendChild(row);
+  });
+}
+function n2(v) { return parseInt(String(v).replace('ref_image_', ''), 10) || 0; }
+
+/* 参考图端口映射：<Picture N> ↔ from 值 ↔ ComfyUI 端口 */
+function renderPmap() {
+  const host = $('#k_pmap'); if (!host) return;
+  if (kTask !== 'edit') { host.innerHTML = ''; return; }
+  const rows = kleinRows();
+  const used = [];
+  rows.forEach(r => { if (r.from.indexOf('ref_image_') === 0 && used.indexOf(r.from) < 0) used.push(r.from); });
+  used.sort((a, b) => n2(a) - n2(b));
+  const prefix = ($('#k_port') && $('#k_port').value.trim()) || 'ref_images.ref_image_';
+  let h = '<div class="pnote" style="margin:8px 0 4px"><b>参考图端口映射（提交前逐行核对）</b>'
+    + '：提示词里写 <code>&lt;Picture N&gt;</code>（从 1 数），表格里的 <code>from</code> 是 <code>ref_image_N</code>（从 0 数）——'
+    + '<b>两边差 1</b>，这张表就是用来防止接错。</div>';
+  h += '<table class="pmap"><thead><tr><th>提示词引用</th><th>表格 from 值</th><th>该接的 ComfyUI 端口</th>'
+    + '<th>这个端口实际接哪张图（自己填，别空着）</th></tr></thead><tbody>';
+  used.forEach(v => {
+    const n = n2(v), pic = n + 1;
+    h += '<tr><td class="mono">&lt;Picture ' + pic + '&gt;</td><td class="mono">' + v + '</td>'
+      + '<td class="mono">' + prefix + n + '</td>'
+      + '<td><input data-port="' + prefix + n + '" placeholder="例：母图 /workspace/ComfyUI/input/xxx.png"></td></tr>';
+  });
+  const hasTarget = rows.some(r => r.from === 'target');
+  if (hasTarget) h += '<tr><td class="mono">—</td><td class="mono">target</td><td class="mono">不接图</td>'
+    + '<td>本次新造的内容，不占参考图端口</td></tr>';
+  h += '</tbody></table>';
+  host.innerHTML = h;
+}
+
+function kleinRows() {
+  const SKIP = new Set(['a', 'an', 'the', 'flat', 'solid', 'single', 'one', 'two', 'three', 'large',
+    'small', 'tiny', 'big', 'bold', 'simple', 'clean', 'warm', 'dark', 'light', 'high', 'low',
+    'full', 'matte', 'off', 'white', 'black', 'red', 'blue', 'green']);
+  let t = 0; const cnt = {}; const rows = [];
+  S.items.forEach((it, idx) => {
+    const margin = it.label === 'text' ? 8 : 0;
+    const f = v => Math.max(0, Math.min(1000, Math.round(v)));
+    const [x1, y1, x2, y2] = it.bbox;
+    const box = [f(y1 / S.height * 1000 - margin), f(x1 / S.width * 1000 - margin),
+                 f(y2 / S.height * 1000 + margin), f(x2 / S.width * 1000 + margin)];
+    let id;
+    if (it.label === 'text') {
+      t += 1; id = (CJK.test(it.text) ? 'Cn' : 'En') + '_Text_' + t;
+    } else {
+      let word = 'object';
+      for (const tok of ((it.caption || '').match(/[a-zA-Z][a-zA-Z-]*/g) || []).slice(0, 8)) {
+        const l = tok.toLowerCase();
+        if (!SKIP.has(l) && l.length > 2) { word = l; break; }
+      }
+      cnt[word] = (cnt[word] || 0) + 1; id = word + '_' + cnt[word];
+    }
+    let desc = capOf(it) || '';
+    if (it.label === 'text' && it.text) desc = (desc + ' Text reads: "' + it.text.replace(/\n/g, ' ') + '".').trim();
+    const fm = kFromOf(idx);
+    const useRef = (kTask === 'edit') && fm !== 'target';
+    rows.push({ id: id, from: fm,
+      src_bbox: useRef ? box : null, tgt_bbox: box, desc: desc });
+  });
+  return rows;
+}
+
+/* ────────── 导出面板 ────────── */
+let tab = 'moss';
+const out = () => {
+  if (tab === 'moss') {
+    const v = validate();
+    return v.E.length ? '' : JSON.stringify(compiledObj());
+  }
+  if (tab === 'draft') return JSON.stringify(draftObj(), null, 1);
+  if (tab === 'klein') {
+    if (kTask !== 'edit') return '';           // 文生图任务：不出 Klein
+    const el = $('#k_ins');
+    let ins = (el && el.value ? el.value : '').trim();
+    if (!ins) return '';
+    if (!/stays identical to the source\s*\.?$/i.test(ins))
+      ins = ins.replace(/\.\s*$/, '') + '. Everything else stays identical to the source.';
+    return ins + ' ' + JSON.stringify(kleinRows());
+  }
+  return JSON.stringify({ summary_zh: S.summary.caption_zh,
+    items: S.items.map(it => ({ caption_zh: it.caption_zh })) }, null, 1);
+};
+
+function refreshExport() {
+  const v = validate();
+  const vl = $('#vlist'); vl.innerHTML = '';
+  v.E.forEach(x => { const d = document.createElement('div'); d.className = 'e'; d.textContent = '✕ ' + x; vl.appendChild(d); });
+  v.Wn.forEach(x => { const d = document.createElement('div'); d.className = 'w'; d.textContent = '! ' + x; vl.appendChild(d); });
+  if (!v.E.length && !v.Wn.length) { const d = document.createElement('div'); d.className = 'ok'; d.textContent = '✓ 校验通过'; vl.appendChild(d); }
+  else if (!v.E.length) { const d = document.createElement('div'); d.className = 'ok'; d.textContent = '✓ 可以编译（有 ' + v.Wn.length + ' 条提醒）'; vl.appendChild(d); }
+
+  const moss = v.E.length ? '（先修掉上面的错误）' : JSON.stringify(compiledObj());
+  const notesObj = {
+    summary_zh: S.summary.caption_zh,
+    items: S.items.map(it => ({ caption_zh: it.caption_zh }))
+  };
+  $('#out_moss').textContent = moss;
+  $('#out_draft').textContent = JSON.stringify(draftObj(), null, 1);
+  $('#out_notes').textContent = JSON.stringify(notesObj, null, 1);
+  if (tab === 'klein') {
+    if (kTask !== 'edit') {
+      $('#out_klein').textContent = '（当前判定为「文生图」：不出 Klein 编辑稿。'
+        + '要改已有图请上面切成「图像编辑」；如果其实分不清是哪种，先别导出，回去问清楚任务类型。）';
+      const kid = $('#k_ids'); if (kid) kid.textContent = '';
+    } else {
+      $('#out_klein').textContent = out() || '（先填一句英文指令）';
+      const kid = $('#k_ids'); if (kid) kid.textContent = 'id：' + kleinRows().map(r => r.id).join(' · ');
+    }
+  }
+  $('#mmsg').textContent = tab === 'moss'
+    ? (v.E.length ? v.E.length + ' 个错误，暂不能编译' : moss.length + ' 字符 · 可直接粘贴')
+    : '';
+}
+
+function switchTab(t) {
+  tab = t;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('#panes > *').forEach(p => p.classList.toggle('on', p.dataset.pane === t));
+  if (t === 'klein') { renderKFrom(); renderPmap(); }
+  refreshExport();
+}
+
+function copyOut(t, msg) {
+  const done = () => { $('#mmsg').textContent = msg || ('已复制 ' + t.length + ' 字符'); };
+  if (t === '') { $('#mmsg').textContent = '没有可复制的内容'; return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, () => fallback(t, done));
+  } else fallback(t, done);
+}
+
+function copyText() {
+  const t = out();
+  if (!t) { $('#mmsg').textContent = '没有可复制的内容'; return; }
+  const done = () => { $('#mmsg').textContent = '已复制 ' + t.length + ' 字符'; };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, () => fallback(t, done));
+  } else fallback(t, done);
+}
+function fallback(t, done) {
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { $('#mmsg').textContent = '复制失败，请手动选中'; }
+  ta.remove();
+}
+function download() {
+  const t = out(); if (!t) return;
+  const names = { moss: 'prompt.txt', draft: 'draft.json', klein: 'klein.txt', notes: 'notes.json' };
+  const blob = new Blob([t], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = names[tab];
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  $('#mmsg').textContent = '已下载 ' + names[tab];
+}
+
+/* ────────── 事件绑定 ────────── */
+function bind() {
+  $('#b_add').onclick = addItem;
+  $('#b_del').onclick = delItem;
+  $('#b_undo').onclick = undo;
+  $('#b_redo').onclick = redo;
+  $('#b_up').onclick = () => moveZ(1);
+  $('#b_down').onclick = () => moveZ(-1);
+  $('#b_exp').onclick = () => { $('#ovl').classList.add('on'); refreshExport(); };
+  $('#mclose').onclick = $('#bdone').onclick = () => $('#ovl').classList.remove('on');
+  $('#ovl').onclick = e => { if (e.target === $('#ovl')) $('#ovl').classList.remove('on'); };
+  $('#tabs').onclick = e => { if (e.target.dataset.tab) switchTab(e.target.dataset.tab); };
+  $('#bcopy').onclick = copyText;
+  $('#bdl').onclick = download;
+  $('#k_ins').oninput = refreshExport;
+  // 任务闸门：文生图 / 图像编辑（认不出就该先问，不要凭猜出 Klein）
+  document.querySelectorAll('input[name=ktask]').forEach(r => {
+    r.onchange = () => {
+      kTask = r.value;
+      const ne = $('#k_t2i_note'), eb = $('#k_editbox');
+      if (ne) ne.hidden = (kTask === 'edit');
+      if (eb) eb.hidden = (kTask !== 'edit');
+      renderKFrom(); renderPmap(); refreshExport();
+    };
+  });
+  const kn = $('#k_nref'); if (kn) kn.oninput = () => { renderKFrom(); renderPmap(); refreshExport(); };
+  const kp = $('#k_port'); if (kp) kp.oninput = renderPmap;
+
+  document.querySelectorAll('.seg button').forEach(b => {
+    b.onclick = () => {
+      expLang = b.dataset.lang;
+      document.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
+      refreshExport();
+    };
+  });
+
+  // 汇总字段
+  [['#s_cap', 'summary', 'caption'], ['#s_cap_zh', 'summary', 'caption_zh']].forEach(([id, , k]) => {
+    const n = $(id);
+    n.onfocus = () => { preEdit = snap(); };
+    n.oninput = () => { if (k === 'caption_zh') S.summary._zhT = true; S.summary[k] = n.value; drawSummary(); };
+    n.onblur = () => { commitEdit(); };
+  });
+  $('#s_meta').onchange = e => { pushUndo(); S.summary.meta = arr(e.target.value); drawSummary(); };
+  $('#s_pal').onchange = e => { pushUndo(); S.summary.palette = arr(e.target.value); drawSummary(); refreshExport(); };
+  const padd = $('#pal_add');
+  if (padd) padd.onclick = () => {
+    pushUndo();
+    const p = S.summary.palette.slice();
+    p.push(p.length ? p[p.length - 1] : '#888888');
+    S.summary.palette = p; drawSummary(); refreshExport();
+  };
+  $('#s_canvas').onchange = e => { pushUndo(); S.summary.canvas = e.target.value; drawSummary(); };
+
+  // 画布尺寸
+  $('#i_w').onchange = e => { const w = Math.max(16, Math.round(+e.target.value / 16) * 16); resizeTo(w, S.height); };
+  $('#i_h').onchange = e => { const h = Math.max(16, Math.round(+e.target.value / 16) * 16); resizeTo(S.width, h); };
+
+  // 元素字段
+  $('#f_label').onchange = e => { pushUndo(); S.items[sel].label = e.target.value; drawAll(); };
+  $('#f_text').onfocus = () => { preEdit = snap(); };
+  $('#f_text').oninput = e => {
+    S.items[sel].text = e.target.value;
+    $('#c_text').textContent = e.target.value.length + ' 字 / ' + (e.target.value.split('\n').length) + ' 行';
+    updateBox(sel); drawLayers();
+  };
+  $('#f_text').onblur = commitEdit;
+  $('#f_cap').onfocus = () => { preEdit = snap(); };
+  $('#f_cap').oninput = e => { S.items[sel].caption = e.target.value; updateBox(sel); drawLayers(); };
+  $('#f_cap').onblur = commitEdit;
+  $('#f_zh').onfocus = () => { preEdit = snap(); };
+  $('#f_zh').oninput = e => { S.items[sel]._zhT = true; S.items[sel].caption_zh = e.target.value; updateBox(sel); drawLayers(); };
+  $('#f_zh').onblur = commitEdit;
+  $('#f_tags').onchange = e => { pushUndo(); S.items[sel].tags = arr(e.target.value); };
+  ['#f_x1', '#f_y1', '#f_x2', '#f_y2'].forEach((id, k) => {
+    $(id).onchange = e => {
+      const v = Math.round(+e.target.value || 0);
+      pushUndo();
+      const b = S.items[sel].bbox.slice(); b[k] = v;
+      S.items[sel].bbox = b[0] < b[2] && b[1] < b[3] ? b : S.items[sel].bbox;
+      drawAll();
+    };
+  });
+  $('#i_ratio').onchange = applyPreset;
+  $('#i_mp').onchange = applyPreset;
+  $('#b_ask').onclick = () => {
+    const t = askText();
+    copyOut(t, '已复制询问单（' + t.split('\n').length + ' 行）');
+  };
+
+  // 画布空白：取消选择时保留当前选中，避免误操作
+  cv.onclick = e => { if (e.target === cv) return; };
+
+  document.addEventListener('keydown', e => {
+    const tag = (e.target.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+    const meta = e.ctrlKey || e.metaKey;
+    if (meta && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+    if (meta && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+    if (meta && e.key.toLowerCase() === 's') { e.preventDefault(); $('#ovl').classList.add('on'); refreshExport(); return; }
+    if (typing) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delItem(); return; }
+    const step = e.shiftKey ? 10 : 1;
+    const it = S.items[sel]; if (!it) return;
+    let d = null;
+    if (e.key === 'ArrowLeft') d = [-step, 0];
+    if (e.key === 'ArrowRight') d = [step, 0];
+    if (e.key === 'ArrowUp') d = [0, -step];
+    if (e.key === 'ArrowDown') d = [0, step];
+    if (d) {
+      e.preventDefault(); pushUndo();
+      it.bbox = clampBox([it.bbox[0] + d[0], it.bbox[1] + d[1], it.bbox[2] + d[0], it.bbox[3] + d[1]]);
+      drawAll();
+    }
+  });
+
+  window.addEventListener('resize', () => { fitCanvas(); });
+}
+
+function commitEdit() {
+  if (preEdit && preEdit !== snap()) { undoStack.push(preEdit); if (undoStack.length > 100) undoStack.shift(); redoStack = []; }
+  preEdit = null; updateBtns(); refreshExport();
+}
+
+/* ────────── 启动 ────────── */
+S = buildState(RAW, NOTES);
+bind();
+drawAll();
+</script>
+</body></html>
+"""
+
+
+def image_payload(path, max_side=1800):
+    """把底图内嵌成 data URI，画布走到哪都带图。
+
+    装了 Pillow 就先压到 max_side 的 JPEG（2.9MB 的 PNG 压完约 300KB）；
+    没装就原样内嵌原文件。Pillow 只是可选依赖，缺了也不影响功能。"""
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+        if max(im.size) > max_side:
+            im.thumbnail((max_side, max_side))
+        buf = _io.BytesIO()
+        im.save(buf, "JPEG", quality=88, optimize=True)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        with open(path, "rb") as f:
+            raw = f.read()
+        ext = os.path.splitext(path)[1].lower()
+        mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+
+
+def load_json(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return json.loads(data) if isinstance(data, str) else data
+
+
+def main():
+    ap = argparse.ArgumentParser(description="把 JSON 布局提示词画成可编辑画布并导出提示词")
+    ap.add_argument("layout", help="草稿或编译稿 JSON")
+    ap.add_argument("-o", "--out", help="输出 HTML（默认与输入同名）")
+    ap.add_argument("--notes", help="中文参考 sidecar：{summary_zh, items:[{caption_zh}]}")
+    ap.add_argument("--image", help="叠上底图：编辑任务里它就是 <Picture 1> 那张待改的图")
+    ap.add_argument("--link", action="store_true",
+                    help="底图用相对路径而不内嵌（图很大时省体积，但 HTML 换目录会丢图）")
+    ap.add_argument("--width", type=int, help="编译稿缺画布尺寸时补上")
+    ap.add_argument("--height", type=int)
+    ap.add_argument("--title", default="JSON 提示词画布")
+    a = ap.parse_args()
+
+    lay = load_json(a.layout)
+    notes = load_json(a.notes) if a.notes else {}
+
+    W = lay.get("width") or a.width
+    H = lay.get("height") or a.height
+    if not W or not H:
+        sys.exit("缺画布尺寸：草稿要有 width/height，编译稿请用 --width/--height 传")
+
+    out = a.out or os.path.splitext(a.layout)[0] + ".html"
+    image, base_tag = "null", ""
+    if a.image:
+        if not os.path.exists(a.image):
+            sys.exit("找不到图片：" + a.image)
+        if a.link:
+            rel = os.path.relpath(os.path.abspath(a.image), os.path.dirname(os.path.abspath(out)))
+            image = json.dumps(rel.replace("\\", "/"), ensure_ascii=False)
+            base_tag = '<span class="bt warn">相对路径（换了目录会丢）</span>'
+        else:
+            image = json.dumps(image_payload(a.image), ensure_ascii=False)
+            base_tag = ('<span class="bt">底图已内嵌 · 这份 HTML 单独拷走也能看</span>')
+        base_tag += '<span class="bt">' + html.escape(os.path.basename(a.image)) + '</span>'
+        base_tag = '<div class="basetag">' + base_tag + '</div>' 
+
+    def dump(o):
+        return json.dumps(o, ensure_ascii=False).replace("</", "<\\/")
+
+    doc = (TEMPLATE
+           .replace("__TITLE__", a.title.replace("<", "&lt;"))
+           .replace("__W__", str(int(W)))
+           .replace("__H__", str(int(H)))
+           .replace("__LAYOUT__", dump(lay))
+           .replace("__NOTES__", dump(notes))
+           .replace("__IMAGE__", image or "null"))
+
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(doc)
+    n = len(lay.get("items") or lay.get("elements") or [])
+    print("写出 %s（%d 个元素，%d×%d）" % (out, n, W, H), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

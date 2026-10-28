@@ -1,0 +1,58 @@
+{
+ "width": 1152,
+ "height": 1536,
+ "bbox_coord_space": "abs",
+ "bbox_format": "xyxy",
+ "summary": {
+  "caption": "A warm still-life poster for a hand-drip coffee set on a dark walnut table, shot slightly above eye level with soft window light from the left. A clear glass carafe of brewed coffee stands behind a bone-white ceramic cup; the cup overlaps the carafe's lower-left body and hides part of it, and a few roasted beans in the foreground overlap the cup's front rim. Deep green Chinese typography sits at the top left, and the bottom edge stays quiet negative space. Restrained editorial product photography, no props beyond the set.",
+  "meta": ["product poster", "still-life photography"],
+  "canvas": "single",
+  "palette": ["#F4EFE6", "#4A3327", "#1F3D2B"]
+ },
+ "items": [
+  {
+   "label": "object",
+   "caption": "A flat matte warm off-white poster surface with very fine paper grain, evenly lit, no vignette, no gradient, no border.",
+   "bbox": [0, 0, 1152, 1536]
+  },
+  {
+   "label": "object",
+   "caption": "A dark walnut table surface filling the lower two thirds of the frame, open grain running left to right, soft sheen from the left window.",
+   "bbox": [0, 700, 1152, 1536],
+   "palette": ["#4A3327"]
+  },
+  {
+   "label": "object",
+   "caption": "A clear glass carafe filled with dark brewed coffee, thin curved handle on its right side, standing on the table; its lower-left body is hidden behind a ceramic cup placed in front of it.",
+   "bbox": [150, 720, 560, 1150]
+  },
+  {
+   "label": "object",
+   "caption": "A bone-white ceramic cup with a matte glaze and a soft rounded rim, standing in front of the glass carafe; its left side overlaps and occludes the carafe's lower-left body, with a small contact shadow under the base.",
+   "bbox": [420, 900, 860, 1290]
+  },
+  {
+   "label": "object",
+   "caption": "A sparse cluster of glossy dark roasted coffee beans on the table in the foreground, each with a visible center crease; two beans overlap the cup's front rim and sit closer to the viewer than the cup.",
+   "bbox": [300, 1230, 700, 1400]
+  },
+  {
+   "label": "text",
+   "caption": "A large deep-green Chinese title in a crisp, moderately heavy serif, tight letter spacing, no backing panel.",
+   "text": "晨间手冲",
+   "bbox": [96, 96, 760, 240]
+  },
+  {
+   "label": "text",
+   "caption": "Small deep-green Chinese supporting copy set on three lines, comfortable leading, same serif family as the title.",
+   "text": "单一产地豆\n十五克粉\n九十二度水",
+   "bbox": [96, 280, 620, 520]
+  },
+  {
+   "label": "text",
+   "caption": "A small deep-green Chinese line at the lower right, wide letter spacing, reading like a stamp.",
+   "text": "每周三烘焙",
+   "bbox": [740, 1390, 1060, 1460]
+  }
+ ]
+}
