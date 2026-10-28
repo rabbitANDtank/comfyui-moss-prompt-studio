@@ -61,6 +61,12 @@ const CSS = `
 .mps-row>label{flex:0 0 58px;color:#a5a5a5;font-size:11px;}
 .mps-row>input[type=text],.mps-row>select{flex:1;min-width:0;background:#1b1b1b;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 4px;font-size:12px;}
 .mps-textarea{width:100%;box-sizing:border-box;background:#1b1b1b;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;font-size:12px;resize:vertical;font-family:inherit;margin:2px 0;}
+/* palette 色块编辑：点色块开原生拾色器，× 删除，＋ 添加 */
+.mps-swbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:2px 0;}
+.mps-sw{position:relative;width:28px;height:22px;border:1px solid #555;border-radius:4px;overflow:hidden;background:#1b1b1b;}
+.mps-sw input[type=color]{position:absolute;inset:0;width:100%;height:100%;border:none;padding:0;background:none;cursor:pointer;}
+.mps-sw .mps-swx{position:absolute;top:-1px;right:0;width:11px;height:11px;line-height:10px;text-align:center;font-size:9px;color:#fff;background:#000a;border-radius:2px;cursor:pointer;opacity:0;}
+.mps-sw:hover .mps-swx{opacity:1;}
 .mps-layer{display:flex;gap:4px;align-items:center;padding:2px 4px;border-radius:4px;cursor:pointer;}
 .mps-layer:hover{background:#2e2e2e;}
 .mps-layer.sel{background:#37517a;}
@@ -704,6 +710,75 @@ function init(node) {
   const csvParse = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
   const csvShow = (v) => (v || []).join(", ");
 
+  // ---------- palette 色块编辑（对齐官方 layout 的 hex 数组语义）----------
+  // summary.palette = 整图主配色倾向；items[].palette = 该元素自身配色。
+  // 交互：点色块调原生拾色器、× 删除、＋ 添加（复制上一色）；色值即时写回草稿。
+  const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+  const normHex = (c) => (HEX_RE.test(String(c || "").trim()) ? String(c).trim() : "#888888");
+  function buildPaletteEditor(host, getArr, setArr) {
+    const bar = document.createElement("div");
+    bar.className = "mps-swbar";
+    host.appendChild(bar);
+    const draw = () => {
+      bar.innerHTML = "";
+      const arr = getArr();
+      arr.forEach((c, i) => {
+        const sw = document.createElement("span");
+        sw.className = "mps-sw";
+        sw.title = c + "（点击改色）";
+        const inp = document.createElement("input");
+        inp.type = "color";
+        inp.value = normHex(c);
+        inp.addEventListener("focus", () => { M.inspPre = snapshot(); });
+        inp.addEventListener("input", () => {
+          const a = getArr(); a[i] = inp.value; setArr(a);
+          afterLightChange();
+        });
+        inp.addEventListener("blur", () => {
+          if (M.inspPre != null && snapshot() !== M.inspPre) { pushUndo(M.inspPre); updateToolbar(); }
+          M.inspPre = null;
+        });
+        const x = document.createElement("span");
+        x.className = "mps-swx";
+        x.textContent = "×";
+        x.title = "删除这个颜色";
+        x.addEventListener("click", (e) => {
+          e.stopPropagation();
+          pushUndo(snapshot());
+          const a = getArr(); a.splice(i, 1); setArr(a);
+          afterChange();
+        });
+        sw.appendChild(inp);
+        sw.appendChild(x);
+        bar.appendChild(sw);
+      });
+      if (!arr.length) {
+        const tip = document.createElement("span");
+        tip.style.cssText = "color:#777;font-size:11px;";
+        tip.textContent = "（无颜色，点＋添加）";
+        bar.appendChild(tip);
+      }
+    };
+    const add = document.createElement("button");
+    add.className = "mps-mini";
+    add.textContent = "＋颜色";
+    add.title = "添加一个颜色（从上一个颜色复制）";
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pushUndo(snapshot());
+      const a = getArr();
+      a.push(a[a.length - 1] || "#888888");
+      setArr(a);
+      afterChange();
+    });
+    host.appendChild(add);
+    draw();
+    return draw;
+  }
+
+  // 写回辅助：空数组则删除该可选字段（官方 schema 里 meta/palette/tags 均可省略）
+  const setOptArr = (obj, key) => (a) => { if (a.length) obj[key] = a; else delete obj[key]; };
+
   function renderInspector() {
     const isLayout = !!(M.S && M.S.kind === "layout");
     M.els.pnlInsp.style.display = M.S ? "" : "none";
@@ -726,22 +801,27 @@ function init(node) {
     sc.className = "mps-textarea"; sc.rows = 3; sc.value = s.caption || ""; sc.dataset.f = "summary.caption";
     bindField(sc, (v) => { s.caption = v; });
     insp.appendChild(sc);
-    if ("meta" in s) {
-      const row = document.createElement("div"); row.className = "mps-row";
-      const l = document.createElement("label"); l.textContent = "meta";
-      const inp = document.createElement("input"); inp.type = "text"; inp.value = csvShow(s.meta);
-      bindField(inp, (v) => { s.meta = csvParse(v); });
-      row.appendChild(l); row.appendChild(inp); insp.appendChild(row);
-    }
+    // meta：体裁标签（字符串数组，自由填写；不存在也能直接添加）
+    const row = document.createElement("div"); row.className = "mps-row";
+    const l = document.createElement("label"); l.textContent = "meta 体裁";
+    const inp = document.createElement("input"); inp.type = "text";
+    inp.value = csvShow(s.meta);
+    inp.placeholder = "product poster, studio photography";
+    inp.title = "整图体裁标签，逗号分隔（原文会作为独立 JSON 字段进入提示词）";
+    bindField(inp, (v) => setOptArr(s, "meta")(csvParse(v)));
+    row.appendChild(l); row.appendChild(inp); insp.appendChild(row);
     if ("canvas" in s) {
-      const row = document.createElement("div"); row.className = "mps-row";
-      const l = document.createElement("label"); l.textContent = "canvas";
+      const row2 = document.createElement("div"); row2.className = "mps-row";
+      const l2 = document.createElement("label"); l2.textContent = "canvas";
       const selc = document.createElement("select");
       VALID_CANVAS.forEach((c) => selc.appendChild(new Option(c, c)));
       selc.value = s.canvas;
       selc.addEventListener("change", () => { pushUndo(snapshot()); s.canvas = selc.value; afterChange(); });
-      row.appendChild(l); row.appendChild(selc); insp.appendChild(row);
+      row2.appendChild(l2); row2.appendChild(selc); insp.appendChild(row2);
     }
+    // palette：整图主配色（hex 色块编辑，不拼进 caption，作为独立字段进提示词）
+    insp.appendChild(h5("palette 主配色（hex）"));
+    buildPaletteEditor(insp, () => s.palette || [], setOptArr(s, "palette"));
 
     insp.appendChild(h5("选中元素"));
     if (M.sel == null) {
@@ -778,15 +858,18 @@ function init(node) {
       bindField(tx, (v) => { it.text = v; });
       insp.appendChild(tx);
     }
-    for (const key of ["tags", "palette"]) {
-      if (key in it) {
-        const row = document.createElement("div"); row.className = "mps-row";
-        const l = document.createElement("label"); l.textContent = key;
-        const inp = document.createElement("input"); inp.type = "text"; inp.value = csvShow(it[key]);
-        bindField(inp, (v) => { it[key] = csvParse(v); });
-        row.appendChild(l); row.appendChild(inp); insp.appendChild(row);
-      }
-    }
+    // tags：该元素的属性标签（常驻可添加）
+    insp.appendChild(h5("tags 元素标签"));
+    const rowT = document.createElement("div"); rowT.className = "mps-row";
+    const inpT = document.createElement("input"); inpT.type = "text";
+    inpT.value = csvShow(it.tags);
+    inpT.placeholder = "matte, ceramic, soft shadow";
+    inpT.title = "元素属性标签，逗号分隔（作为独立 JSON 字段进入提示词）";
+    bindField(inpT, (v) => setOptArr(it, "tags")(csvParse(v)));
+    rowT.appendChild(inpT); insp.appendChild(rowT);
+    // palette：该元素自身配色（hex 色块编辑）
+    insp.appendChild(h5("palette 元素配色（hex）"));
+    buildPaletteEditor(insp, () => it.palette || [], setOptArr(it, "palette"));
     const del = document.createElement("button");
     del.className = "mps-mini"; del.style.marginTop = "6px"; del.textContent = "🗑 删除该元素";
     del.addEventListener("click", () => delItem(M.sel));

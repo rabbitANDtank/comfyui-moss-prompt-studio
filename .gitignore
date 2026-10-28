@@ -18,3 +18,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# 研究用临时镜像，绝不进仓库
+_repo/
+_research_*/
