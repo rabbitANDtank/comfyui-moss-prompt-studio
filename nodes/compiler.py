@@ -90,9 +90,9 @@ class MOSSCompiler:
 
 
 def _resolve_size(canvas_width, canvas_height, width, height):
-    """caption/已编译形态的尺寸：连线值优先，否则回落 widget。"""
-    w = _linked_dim(canvas_width, "canvas_width") if canvas_width is not None else int(width)
-    h = _linked_dim(canvas_height, "canvas_height") if canvas_height is not None else int(height)
+    """caption/已编译形态的尺寸：连线值优先，否则回落 widget（两者都必须是 16 倍数）。"""
+    w = _linked_dim(canvas_width, "canvas_width") if canvas_width is not None else _linked_dim(width, "width")
+    h = _linked_dim(canvas_height, "canvas_height") if canvas_height is not None else _linked_dim(height, "height")
     return w, h
 
 

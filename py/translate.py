@@ -18,15 +18,16 @@ import json
 import math
 import os
 import re
+import stat
 import time
 import urllib.error
 import urllib.request
 
 try:
-    from .compile_prompt import VALID_CANVAS, VALID_LABELS, validate_draft
+    from .compile_prompt import DraftError, VALID_CANVAS, VALID_LABELS, validate_draft
     from .sniff import strict_loads
 except ImportError:  # 兼容非包方式导入
-    from compile_prompt import VALID_CANVAS, VALID_LABELS, validate_draft
+    from compile_prompt import DraftError, VALID_CANVAS, VALID_LABELS, validate_draft
     from sniff import strict_loads
 
 MAX_RETRY = 2  # 首次之外最多重试 2 次
@@ -55,6 +56,10 @@ class TranslationError(ValueError):
     """翻译结果结构不合规或调用失败。"""
 
 
+class PermanentError(TranslationError):
+    """不可重试的调用错误（400/401/403/404/422 等参数或鉴权错误）。"""
+
+
 def _plugin_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,6 +75,7 @@ AGENT_DEFAULT = "(默认 AGENT.md)"
 AGENT_OFF = "(不注入)"
 AGENT_BEGIN = "<!-- MOSS-STUDIO:AGENT:BEGIN -->"
 AGENT_END = "<!-- MOSS-STUDIO:AGENT:END -->"
+MAX_AGENT_FILE_BYTES = 64 * 1024
 
 
 def _agent_md_root_path() -> str:
@@ -82,7 +88,12 @@ def list_agent_md_files() -> list:
     d = os.path.join(_plugin_root(), AGENT_DIR)
     if not os.path.isdir(d):
         return []
-    return sorted(f for f in os.listdir(d) if f.lower().endswith(".md") and os.path.isfile(os.path.join(d, f)))
+    return sorted(
+        f for f in os.listdir(d)
+        if f.lower().endswith(".md")
+        and os.path.isfile(os.path.join(d, f))
+        and not os.path.islink(os.path.join(d, f))
+    )
 
 
 def agent_md_widget_options() -> list:
@@ -95,13 +106,37 @@ def agent_md_widget_options() -> list:
 
 
 def _read_agent_file(path: str) -> str:
-    """读单个指令文件并应用托管块标记规则；不存在返回 ""。"""
+    """读单个指令文件并应用托管块标记规则；不存在返回 ""。
+
+    安全约束：拒绝符号链接和非普通文件，并限制大小（防任意文件读取/超大文件塞进提示词）。
+    """
     if not os.path.exists(path):
         return ""
+    if os.path.islink(path):
+        raise TranslationError(f"指令文件不能是符号链接: {path}")
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except (OSError, UnicodeDecodeError) as e:
+        st = os.stat(path)
+    except OSError as e:
+        raise TranslationError(f"指令文件读取失败 [{path}]: {e}") from e
+    if not stat.S_ISREG(st.st_mode):
+        raise TranslationError(f"指令文件必须是普通文件: {path}")
+    if st.st_size > MAX_AGENT_FILE_BYTES:
+        raise TranslationError(
+            f"指令文件过大 [{os.path.basename(path)}]: {st.st_size} 字节，"
+            f"上限 {MAX_AGENT_FILE_BYTES} 字节"
+        )
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(MAX_AGENT_FILE_BYTES + 1)
+    except OSError as e:
+        raise TranslationError(f"指令文件读取失败 [{path}]: {e}") from e
+    if len(raw) > MAX_AGENT_FILE_BYTES:
+        raise TranslationError(
+            f"指令文件过大 [{os.path.basename(path)}]: 上限 {MAX_AGENT_FILE_BYTES} 字节"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
         raise TranslationError(f"指令文件读取失败 [{path}]: {e}") from e
     nb, ne = text.count(AGENT_BEGIN), text.count(AGENT_END)
     if nb or ne:
@@ -127,7 +162,15 @@ def load_agent_md(selection: str = "") -> str:
     if not sel or sel == AGENT_DEFAULT:
         return _read_agent_file(_agent_md_root_path())
     name = os.path.basename(sel)  # 防路径穿越：只认文件名
-    path = os.path.join(_plugin_root(), AGENT_DIR, name)
+    base = os.path.realpath(os.path.join(_plugin_root(), AGENT_DIR))
+    path = os.path.join(base, name)
+    real = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([base, real]) == base
+    except ValueError:
+        inside = False
+    if not inside or os.path.islink(path):
+        raise TranslationError(f"指令文件必须位于 agents/ 目录内且不能是符号链接: {name}")
     if not os.path.isfile(path):
         raise TranslationError(
             f"指令文件不存在: agents/{name}（现有: {list_agent_md_files() or '无'}；"
@@ -251,7 +294,11 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
         print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
               f"model={body.get('model')} thinking={body.get('thinking')} "
               f"effort={body.get('reasoning_effort')} HTTP {e.code}", flush=True)
-        raise TranslationError(f"HTTP {e.code} [{url}]: {detail}") from e
+        err = f"HTTP {e.code} [{url}]: {detail}"
+        # 鉴权/参数/路径/校验错误重试也不会好；429/5xx/408 才值得重试
+        if e.code in (408, 409, 425, 429) or e.code >= 500:
+            raise TranslationError(err) from e
+        raise PermanentError(err) from e
     except urllib.error.URLError as e:
         raise TranslationError(f"连接失败 [{url}]（检查 base_url/网络/服务是否在跑）: {e.reason}") from e
     except json.JSONDecodeError as e:
@@ -463,6 +510,11 @@ def check_translation(src_info: dict, out) -> dict:
                          f"{pre}.{key} 数组长度与源不一致")
                 if key == "palette":
                     _check_hex_preserved(a[key], b[key], f"{pre}.palette")
+    # 长度/hex 检查不够：翻译输出也要过一遍官方草稿校验（meta/tags/palette 必须是字符串数组等）
+    try:
+        validate_draft(out)
+    except DraftError as e:
+        raise TranslationError(f"翻译输出草稿不合法: {e}") from e
     return out
 
 
@@ -489,6 +541,8 @@ def translate(src_info: dict, *, base_url: str, api_key: str, body: dict,
             last_raw = raw
             out = extract_json(raw)
             return check_translation(src_info, out)
+        except PermanentError:
+            raise
         except Exception as e:  # 统一进入重试：HTTP 错误 / JSON 解析 / 结构校验
             print(f"[MOSS Studio] 翻译 attempt={attempt + 1} 失败: {str(e)[:300]}", flush=True)
             last_err = e
@@ -694,6 +748,8 @@ def prose_to_layout(prose: str, *, width: int, height: int, base_url: str, api_k
             out = _repair_ai_draft(out, width, height, fallback_caption=prose)
             validate_draft(out)
             return out
+        except PermanentError:
+            raise
         except Exception as e:  # HTTP / JSON / 草稿校验 统一重试
             print(f"[MOSS Studio] AI 拆解 attempt={attempt + 1} 失败: {str(e)[:300]} "
                   f"| 输出开头: {last_raw[:160]!r}", flush=True)

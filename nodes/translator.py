@@ -17,6 +17,7 @@ try:
         TranslationError,
         agent_md_widget_options,
         build_body,
+        load_agent_md,
         load_config,
         resolve_endpoint,
         translate,
@@ -29,6 +30,7 @@ except ImportError:  # 兼容非包方式导入
         TranslationError,
         agent_md_widget_options,
         build_body,
+        load_agent_md,
         load_config,
         resolve_endpoint,
         translate,
@@ -40,6 +42,31 @@ class MOSSTranslator:
     FUNCTION = "run"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("draft_en",)
+
+    @classmethod
+    def IS_CHANGED(cls, draft, provider, base_url, model, api_key, temperature, thinking,
+                   timeout, system_prompt, extra_body, agent_md=AGENT_DEFAULT,
+                   extra_instructions=None, **kwargs):
+        """把外部文件内容也纳入缓存键：AGENT.md/config.json 改动、key 轮换都要重新执行。"""
+        import hashlib
+        import json
+
+        try:
+            agent_text = load_agent_md(agent_md)
+        except Exception as e:  # 文件标记错误也要让缓存失效，执行时再报明确错误
+            agent_text = f"ERR:{e}"
+        try:
+            cfg_text = json.dumps(load_config(), sort_keys=True, ensure_ascii=False)
+        except Exception as e:
+            cfg_text = f"ERR:{e}"
+        payload = json.dumps({
+            "draft": draft, "provider": provider, "base_url": base_url, "model": model,
+            "api_key": api_key, "temperature": temperature, "thinking": thinking,
+            "timeout": timeout, "system_prompt": system_prompt, "extra_body": extra_body,
+            "agent_md": agent_md, "extra_instructions": extra_instructions,
+            "agent_text": agent_text, "config": cfg_text,
+        }, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
     @classmethod
     def INPUT_TYPES(cls):

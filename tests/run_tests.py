@@ -22,7 +22,10 @@ sys.path.insert(0, ROOT)
 from py.compile_prompt import DraftError, compile_draft, validate_compiled, validate_draft  # noqa: E402
 from py.sniff import SniffError, sniff, strict_loads  # noqa: E402
 from py.translate import (  # noqa: E402
+    AGENT_DEFAULT,
     DEFAULT_AI_DRAFT_PROMPT,
+    MAX_AGENT_FILE_BYTES,
+    PermanentError,
     TranslationError,
     build_body,
     check_translation,
@@ -123,6 +126,12 @@ def test_validate_rejects():
     bad = copy.deepcopy(CUP); bad["items"] = []
     _expect(DraftError, validate_draft, bad)                             # 空 items
     _expect(DraftError, validate_compiled, {**COMPILED_POSTER, "width": 1024})  # 编译态不该有 width
+    badc = copy.deepcopy(COMPILED_POSTER); badc["items"][0]["bbox"] = [-416.0, -384, -288, 384]
+    _expect(DraftError, validate_compiled, badc)                              # 编译态 bbox 必须是整数
+    badc = copy.deepcopy(COMPILED_POSTER); badc["items"][0]["bbox"] = [-288, -384, -416, 384]
+    _expect(DraftError, validate_compiled, badc)                              # y0 必须小于 y1
+    badc = copy.deepcopy(COMPILED_POSTER); badc["items"][0]["bbox"] = [-416, 384, -288, -384]
+    _expect(DraftError, validate_compiled, badc)                              # x0 必须小于 x1
 
 
 def test_sniff_forms_and_roundtrip():
@@ -196,6 +205,8 @@ def test_compiler_node():
     assert (w, h) == (1536, 1024)
     # 连线值必须是 16 的倍数
     _expect(SniffError, node.run, '{"caption":"你好"}', "neg", 1024, 1024, False, 1000, 1024)
+    # widget 兜底值也必须过 16 倍数校验
+    _expect(SniffError, node.run, '{"caption":"你好"}', "neg", 1000, 1024)
 
 
 # ---------- 翻译：结构校验 / endpoint / 请求体 ----------
@@ -210,6 +221,8 @@ def test_check_translation():
     _expect(TranslationError, check_translation, src, bad)          # bbox 被动
     bad = copy.deepcopy(GOOD_EN); bad["items"][1]["text"] = "EXPLORE"
     _expect(TranslationError, check_translation, src, bad)          # 可见文字被译
+    bad = copy.deepcopy(GOOD_EN); bad["summary"]["meta"] = [123]
+    _expect(TranslationError, check_translation, src, bad)          # 数组元素类型非法
     bad = copy.deepcopy(GOOD_EN); bad["items"][0]["tags"] = ["photo"]
     _expect(TranslationError, check_translation, src, bad)          # 私自加字段
     bad = copy.deepcopy(GOOD_EN); bad["items"] = bad["items"][:1]
@@ -302,12 +315,13 @@ def test_resolve_endpoint_and_body():
 class MockHandler(http.server.BaseHTTPRequestHandler):
     queue = []
     hits = 0
+    status = 200
 
     def do_POST(self):
         type(self).hits += 1
         content = type(self).queue.pop(0) if type(self).queue else "garbage not json"
         body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
-        self.send_response(200)
+        self.send_response(type(self).status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -320,6 +334,7 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
 def _start_mock():
     MockHandler.queue = []
     MockHandler.hits = 0
+    MockHandler.status = 200
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -413,6 +428,58 @@ def test_agent_md_append_injection():
         os.environ.pop("COMFY_MOSS_STUDIO_AGENT_MD", None)
         if old is not None:
             os.environ["COMFY_MOSS_STUDIO_AGENT_MD"] = old
+
+
+def test_agent_md_file_limits():
+    """agents/ 下的符号链接和超大文件必须拒绝，防止任意文件读取/提示词爆炸。"""
+    import tempfile
+
+    from py.translate import load_agent_md
+    agents_dir = os.path.join(ROOT, "agents")
+    os.makedirs(agents_dir, exist_ok=True)
+    big = os.path.join(agents_dir, "__test_big__.md")
+    link = os.path.join(agents_dir, "__test_link__.md")
+    target = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8")
+    try:
+        target.write("outside")
+        target.close()
+        with open(big, "w", encoding="utf-8") as f:
+            f.write("x" * (MAX_AGENT_FILE_BYTES + 1))
+        _expect(TranslationError, load_agent_md, "__test_big__.md")
+        try:
+            os.symlink(target.name, link)
+        except (OSError, NotImplementedError):
+            pass  # Windows 无权限时不强求符号链接测试
+        else:
+            _expect(TranslationError, load_agent_md, "__test_link__.md")
+    finally:
+        for p in (big, link):
+            if os.path.exists(p) or os.path.islink(p):
+                os.unlink(p)
+        os.unlink(target.name)
+
+
+def test_translator_is_changed_tracks_agent_md():
+    """AGENT.md 内容变化必须让 Translator 缓存失效（否则热重载/换词表不生效）。"""
+    import tempfile
+
+    old = os.environ.get("COMFY_MOSS_STUDIO_AGENT_MD")
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8")
+    try:
+        tmp.write("RULE A")
+        tmp.close()
+        os.environ["COMFY_MOSS_STUDIO_AGENT_MD"] = tmp.name
+        args = ('{"caption":"x"}', "custom", "http://x/v1", "m", "EMPTY", 0.3, "off", 30, "", "")
+        h1 = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None)
+        with open(tmp.name, "w", encoding="utf-8") as f:
+            f.write("RULE B")
+        h2 = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None)
+        assert h1 != h2, "AGENT.md 内容变了，缓存键必须变"
+    finally:
+        os.environ.pop("COMFY_MOSS_STUDIO_AGENT_MD", None)
+        if old is not None:
+            os.environ["COMFY_MOSS_STUDIO_AGENT_MD"] = old
+        os.unlink(tmp.name)
 
 
 def test_agent_md_widget_selection():
@@ -523,6 +590,19 @@ def test_http_truncation_detected():
         except TranslationError as e:
             assert "截断" in str(e)
     finally:
+        srv.shutdown()
+
+
+def test_http_permanent_not_retried():
+    """401/403/400 等永久错误不应重试 3 次。"""
+    srv = _start_mock()
+    try:
+        MockHandler.status = 401
+        MockHandler.queue = ["unauthorized"]
+        _expect(PermanentError, _run_translator, f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        assert MockHandler.hits == 1, "永久错误只应请求一次"
+    finally:
+        MockHandler.status = 200
         srv.shutdown()
 
 
@@ -658,12 +738,15 @@ TESTS = [
     test_extract_json_repairs,
     test_palette_meta_roundtrip,
     test_agent_md_append_injection,
+    test_translator_is_changed_tracks_agent_md,
     test_agent_md_widget_selection,
     test_resolve_endpoint_and_body,
     test_http_first_try_success,
     test_http_retry_success,
     test_http_fail_after_retries,
     test_http_truncation_detected,
+    test_http_permanent_not_retried,
+    test_agent_md_file_limits,
     test_ai_draft_success_and_writeback,
     test_ai_draft_repairs_bad_bbox_and_extra_fields,
     test_ai_draft_repairs_missing_summary,

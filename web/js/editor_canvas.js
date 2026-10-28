@@ -9,6 +9,13 @@
  *       比例预设+16吸附 / 底图对比(回接生成图) / 实时校验 / 复制 draft JSON。
  */
 import { app } from "/scripts/app.js";
+import {
+  VALID_LABELS, VALID_CANVAS, OCCL_FRONT, OCCL_BACK,
+  detectKind, reverseCompiled, validateDraft as validateJS,
+  parseSourceText, snapshotOf, serializeDraft,
+  clampDim, snap16, clampBox, csvParse, csvShow,
+} from "./editor/model.js";
+import { editorFlushRegistry, mountEditorLifecycle, mountCompilerSync } from "./editor/comfy-hooks.js";
 
 console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
 
@@ -22,10 +29,6 @@ const RATIOS = [
 ];
 // 官方口径：支持 0.25M（512×512）到 4M（2K），推荐 1M / 1.5M / 2M。
 const MP_OPTS = [["0.25", "0.25M"], ["0.5", "0.5M"], ["1", "1M"], ["1.5", "1.5M"], ["2", "2M"], ["3", "3M"], ["4", "4M"]];
-const OCCL_FRONT = "，处于最前层，部分遮挡相邻元素";
-const OCCL_BACK = "，被前方元素部分遮挡";
-const VALID_LABELS = ["object", "character", "text"];
-const VALID_CANVAS = ["single", "multi_panel", "collage"];
 const AGENT_MD_DEFAULT = "(默认 AGENT.md)";
 
 // agent_md 下拉的空值纠正：自动恢复的旧工作流可能存出 ''，后端虽然兼容，
@@ -116,35 +119,9 @@ const PRESET_KEYS = ["provider", "base_url", "model", "api_key", "temperature", 
 const UD_PATH = "/userdata/moss_studio_llm_presets.json";
 let PRESETS = null;
 const presetSubs = new Set();
-// 所有 Editor 的“立即写回 edits”函数；Queue 前统一 flush，避免手动改文字后仍用旧草稿。
-const flushSubs = new Set();
-let queueHookInstalled = false;
 
 const getApi = () => (typeof app !== "undefined" && app.api) || (typeof window !== "undefined" && window.app && window.app.api);
-
-function flushAllEdits() {
-  for (const fn of flushSubs) {
-    try { fn(); } catch (e) { /* noop */ }
-  }
-}
-
-// 点击 Queue 时 ComfyUI 会先序列化节点 widget；Inspector 的 300ms 防抖可能还没写回，
-// 这里在 app.queuePrompt 外面包一层，提交前把所有 Editor 的当前状态强制写进 edits。
-function installQueueHook() {
-  if (queueHookInstalled) return;
-  if (typeof app === "undefined" || !app || typeof app.queuePrompt !== "function") return;
-  queueHookInstalled = true;
-  const orig = app.queuePrompt;
-  app.queuePrompt = function (...args) {
-    flushAllEdits();
-    return orig.apply(this, args);
-  };
-}
-installQueueHook();
-// Ctrl/Cmd+Enter 是常用的 Queue 快捷键；在输入框里按也不会触发 blur，这里补一道 flush。
-document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") flushAllEdits();
-}, true);
+editorFlushRegistry.install(app);
 
 function broadcastPresets() {
   const list = PRESETS || [];
@@ -228,70 +205,26 @@ function deletePresetFrom(sel, notify) {
   if (notify) notify(`配置「${name}」已删除`);
 }
 
-function detectKind(o) {
-  if (!o || typeof o !== "object" || Array.isArray(o)) return null;
-  const ks = Object.keys(o);
-  if (ks.length === 1 && ks[0] === "caption" && typeof o.caption === "string") return "caption";
-  if ("items" in o || "summary" in o) {
-    if (o.bbox_coord_space === "abs" && o.bbox_format === "xyxy") return "draft";
-    if (o.bbox_coord_space === "abs_centralized" && o.bbox_format === "ycyx") return "compiled";
-    if (o.bbox_coord_space === "abs_centralized" && o.bbox_format === "yxyx") return "compiled";
-  }
-  return null;
-}
-
-function reverseCompiled(o, W, H) {
-  const items = o.items.map((it) => {
-    const [y0, x0, y1, x1] = it.bbox;
-    return {
-      ...it,
-      bbox: [Math.round(x0 + W / 2), Math.round(y0 + H / 2), Math.round(x1 + W / 2), Math.round(y1 + H / 2)],
-    };
-  });
-  return { width: W, height: H, bbox_coord_space: "abs", bbox_format: "xyxy", summary: { ...o.summary }, items };
-}
-
-function isNum(v) { return typeof v === "number" && isFinite(v); }
-
-function validateJS(S) {
-  const errs = [];
-  if (!S) return errs;
-  if (S.kind === "caption") {
-    if (!S.caption.trim()) errs.push("caption 为空");
-    return errs;
-  }
-  const d = S.d;
-  if (!Number.isInteger(d.width) || d.width % 16 !== 0 || d.width <= 0) errs.push(`width=${d.width} 不是 16 的正倍数`);
-  if (!Number.isInteger(d.height) || d.height % 16 !== 0 || d.height <= 0) errs.push(`height=${d.height} 不是 16 的正倍数`);
-  const s = d.summary || {};
-  if (!s.caption || !s.caption.trim()) errs.push("summary.caption 为空");
-  if (s.canvas && !VALID_CANVAS.includes(s.canvas)) errs.push(`summary.canvas=${s.canvas} 非法`);
-  (d.items || []).forEach((it, i) => {
-    const pre = `items[${i}]`;
-    if (!VALID_LABELS.includes(it.label)) errs.push(`${pre}.label=${it.label} 非法`);
-    if (!it.caption || !it.caption.trim()) errs.push(`${pre}.caption 为空`);
-    const b = it.bbox;
-    if (!Array.isArray(b) || b.length !== 4 || !b.every(isNum)) errs.push(`${pre}.bbox 不是四个数字`);
-    else if (d.width > 0 && d.height > 0) {
-      const [x0, y0, x1, y1] = b;
-      if (!(x0 >= 0 && x0 < x1 && x1 <= d.width)) errs.push(`${pre}.bbox x 越界/翻转 ${JSON.stringify(b)}`);
-      if (!(y0 >= 0 && y0 < y1 && y1 <= d.height)) errs.push(`${pre}.bbox y 越界/翻转 ${JSON.stringify(b)}`);
-    }
-    if (it.label === "text" && (!it.text || !it.text.trim())) errs.push(`${pre} 是 text 元素但 text 为空`);
-    if (it.label !== "text" && "text" in it) errs.push(`${pre} 不是 text 元素不应有 text`);
-  });
-  if (!Array.isArray(d.items) || !d.items.length) errs.push("items 为空");
-  return errs;
-}
-
 function init(node) {
   if (node._mpsInit) return;
   node._mpsInit = true;
   injectStyle();
 
   const W = (name) => node.widgets.find((w) => w.name === name);
-  const wSource = W("source"), wEdits = W("edits"), wCw = W("canvas_width"), wCh = W("canvas_height"), wAi = W("ai_draft");
+  let wSource = W("source"), wEdits = W("edits"), wCw = W("canvas_width"), wCh = W("canvas_height"), wAi = W("ai_draft");
   if (!wSource || !wEdits || !wCw || !wCh) { console.warn("[MOSS Studio] Editor 节点 widget 不完整，画布未启用"); return; }
+  // 新版前端在 configure 时可能替换 widget 对象；每次生命周期/轮询都按名字重新绑定，
+  // 避免闭包里拿着旧 widget 读写，导致“界面改了但 edits 没变”。
+  const rebindWidgets = () => {
+    const s = W("source"), e = W("edits"), cw = W("canvas_width"), ch = W("canvas_height"), ai = W("ai_draft");
+    if (s) wSource = s;
+    if (e) wEdits = e;
+    if (cw) wCw = cw;
+    if (ch) wCh = ch;
+    if (ai) wAi = ai;
+    bindEditsWidget();
+    return !!(wSource && wEdits && wCw && wCh);
+  };
   if (typeof node.addDOMWidget !== "function") { console.warn("[MOSS Studio] 当前前端不支持 addDOMWidget，画布未启用"); return; }
   sanitizeAgentMd(node);
 
@@ -389,7 +322,7 @@ function init(node) {
   }, "复制编辑后的草稿 JSON");
   // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布
   const btnSplit = mkBtn("⚡拆解", () => runAiSplit(btnSplit), "把 source 散文拆解为布局草稿（只执行本节点，不跑整个工作流）");
-  mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets(); });
+  mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); });
 
   const main = document.createElement("div");
   main.className = "mps-main";
@@ -505,6 +438,7 @@ function init(node) {
     wSource, wEdits, wCw, wCh,
     els: { canvasWrap, canvas, underlay, undChk, capBox, msg, layers, insp, overlap, status, snapChk, btnUndo, btnRedo, btnDel, pnlLayers, pnlInsp, pnlOv },
     builtSig: null, pendSig: null, timer: null, wt: null,
+    editsDirty: false, editsCb: null, writingEdits: false,
   });
 
   // 响应式降级：节点被拖窄（或加载了窄节点）时，先收窄侧栏、再改为上下堆叠，
@@ -558,7 +492,7 @@ function init(node) {
   };
 
   // ---------- 状态 ----------
-  const snapshot = () => (M.S.kind === "caption" ? JSON.stringify({ caption: M.S.caption }) : JSON.stringify(M.S.d));
+  const snapshot = () => snapshotOf(M.S);
   const currentSig = () => `${wSource.value}\u0000${wCw.value},${wCh.value}`;
 
   function syncWidgets() {
@@ -570,11 +504,67 @@ function init(node) {
     M.pendSig = M.builtSig;
   }
 
-  function writeEdits() {
-    if (!M.S) { wEdits.value = ""; return; }
-    wEdits.value = M.S.kind === "caption"
-      ? JSON.stringify({ caption: M.S.caption }, null, 1)
-      : JSON.stringify(M.S.d, null, 1);
+  function writeEdits(opts = {}) {
+    // M.S 为空只代表“当前无法解析”，不能顺手清空已保存的 edits；
+    // 只有显式重置/清空时才允许传 clear:true。
+    M.writingEdits = true;
+    try {
+      if (!M.S) {
+        if (opts.clear) wEdits.value = "";
+      } else {
+        wEdits.value = serializeDraft(M.S);
+      }
+      M.editsDirty = false;
+      clearTimeout(M.editsCb);
+    } finally {
+      M.writingEdits = false;
+    }
+  }
+
+  // ---------- 手改 edits（文档承诺） ----------
+  // ComfyUI 的 edits widget 是用户可直接编辑的；用户输入后按 debounce 解析并接管画布，
+  // 而不是等下一次画布 flush 把它覆盖回旧状态。
+  function bindEditsWidget() {
+    if (!wEdits || wEdits.__mpsEditsCb) return;
+    const prev = wEdits.callback;
+    wEdits.callback = function (...args) {
+      const r = prev ? prev.apply(this, args) : undefined;
+      if (!M.writingEdits) scheduleAdoptEdits();
+      return r;
+    };
+    wEdits.__mpsEditsCb = true;
+  }
+
+  function scheduleAdoptEdits() {
+    M.editsDirty = true;
+    clearTimeout(M.editsCb);
+    M.editsCb = setTimeout(() => {
+      try { adoptEdits(true); } catch (e) { /* noop */ }
+    }, 350);
+  }
+
+  function adoptEdits(showErrors = true) {
+    clearTimeout(M.editsCb);
+    const raw = (wEdits.value || "").trim();
+    M.editsDirty = false;
+    if (!raw) {
+      if (showErrors) showMsg("edits 为空：请填写草稿 JSON 或使用画布编辑", true);
+      return false;
+    }
+    let next;
+    try {
+      next = applySourceText(raw);
+    } catch (e) {
+      if (showErrors) showMsg("edits 不是合法草稿: " + (e.message || e), true);
+      return false;
+    }
+    if (M.S && JSON.stringify(next) === JSON.stringify(M.S)) return true;
+    const pre = M.S ? snapshot() : null;
+    M.S = next;
+    M.sel = null; M.undo = []; M.redo = [];
+    if (pre) pushUndo(pre);
+    syncWidgets(); renderAll(); updateToolbar(); hideMsg();
+    return true;
   }
   const writeEditsSoon = () => {
     clearTimeout(M.wt);
@@ -582,9 +572,32 @@ function init(node) {
   };
   const flushEdits = () => {
     clearTimeout(M.wt);
-    try { writeEdits(); } catch (e) { /* noop */ }
+    rebindWidgets();
+    try {
+      // 用户刚手改过 edits：先接管；有效且 source 未变时保留用户原始文本，不重排覆盖。
+      // 不只依赖 widget callback：Queue 前直接对比文本，callback 没触发也能兜住。
+      const manualText = (wEdits.value || "").trim();
+      const serialized = M.S ? serializeDraft(M.S).trim() : "";
+      const hadManual = M.editsDirty || (manualText && manualText !== serialized);
+      if (hadManual) {
+        adoptEdits(false);
+        if (currentSig() === M.builtSig) return;
+      }
+      // source 改了但还没被 700ms 轮询接管 → 提交前同步重建，避免 Queue 用旧 edits
+      if (currentSig() !== M.builtSig) {
+        rebuildFromWidgets({ preferEdits: false, write: false });
+        if (M.S) writeEdits();
+        return;
+      }
+      if (!M.S) {
+        rebuildFromWidgets({ preferEdits: true, write: false });
+        if (M.S) writeEdits();
+        return;
+      }
+      writeEdits();
+    } catch (e) { /* noop */ }
   };
-  flushSubs.add(flushEdits);
+  const unregisterFlush = editorFlushRegistry.register(flushEdits);
 
   function showMsg(text, isErr) {
     msg.className = "mps-msg" + (isErr ? " err" : "");
@@ -593,52 +606,69 @@ function init(node) {
   }
   const hideMsg = () => { msg.style.display = "none"; };
 
-  // 文本 → S 状态（共用：source 粘贴与 AI 拆解结果写回走同一条路）
+  // 文本 → S 状态（纯解析在 model.js；这里只补当前画布尺寸）
   function applySourceText(src) {
-    const s = (src || "").trim();
-    if (!s) throw new Error("内容为空");
-    let obj;
-    try {
-      obj = JSON.parse(s);
-    } catch (e) {
-      if (s && !s.startsWith("{") && !s.startsWith("[")) {
-        obj = { caption: s }; // 纯文本散文 → caption 形态（与后端 sniff 行为一致）
-      } else {
-        throw new Error("JSON 解析失败: " + e.message);
-      }
-    }
-    const kind = detectKind(obj);
-    if (kind === "caption") {
-      if (typeof obj.caption !== "string" || !obj.caption.trim()) throw new Error("caption 为空");
-      return { kind: "caption", caption: obj.caption };
-    }
-    if (kind === "draft") return { kind: "layout", d: obj };
-    if (kind === "compiled") return { kind: "layout", d: reverseCompiled(obj, +wCw.value || 1024, +wCh.value || 1024) };
-    throw new Error('无法识别形态：需要 {"caption":...} 或带 summary/items 的布局提示词');
+    return parseSourceText(src, +wCw.value || 1024, +wCh.value || 1024);
   }
 
-  function setStateFromText(src) {
+  function setStateFromText(src, opts = {}) {
     M.S = applySourceText(src);
     M.sel = null; M.undo = []; M.redo = [];
     hideMsg();
-    syncWidgets(); renderAll(); writeEdits(); updateToolbar();
+    syncWidgets(); renderAll();
+    if (opts.write !== false) {
+      writeEdits();
+    } else {
+      M.editsDirty = false;
+      clearTimeout(M.editsCb);
+    }
+    updateToolbar();
   }
 
-  function rebuildFromWidgets() {
+  function rebuildFromWidgets(opts = {}) {
+    const { preferEdits = false, write = true, clearEditsOnEmpty = false } = opts;
+    rebindWidgets();
+    M.editsDirty = false;
+    clearTimeout(M.editsCb);
     const src = (wSource.value || "").trim();
+    const edits = (wEdits.value || "").trim();
     M.S = null; M.sel = null; M.undo = []; M.redo = [];
     hideMsg();
-    if (!src) {
+
+    // 加载/恢复时 edits 优先（AI 拆解结果、画布编辑）；source 变化时 source 优先。
+    const candidates = [];
+    if (preferEdits) {
+      if (edits) candidates.push({ text: edits, fromEdits: true });
+      if (src) candidates.push({ text: src, fromEdits: false });
+    } else {
+      if (src) candidates.push({ text: src, fromEdits: false });
+      else if (edits) candidates.push({ text: edits, fromEdits: true });
+    }
+
+    if (!candidates.length) {
       showMsg("粘贴源为空 —— 在 source 框里贴入上游产出的中文草稿 JSON", false);
-      renderAll(); writeEdits(); updateToolbar();
+      M.builtSig = M.pendSig = currentSig();
+      renderAll();
+      if (clearEditsOnEmpty) writeEdits({ clear: true });
+      updateToolbar();
       return;
     }
-    try {
-      setStateFromText(src);
-    } catch (e) {
-      showMsg(String(e.message || e), true);
-      renderAll(); writeEdits(); updateToolbar();
+
+    let lastErr = null;
+    for (const c of candidates) {
+      try {
+        // 从 edits 恢复时保留原始字符串；回退到 source 时必须写回，否则旧的非法 edits 会一直优先
+        setStateFromText(c.text, { write: write !== false || !c.fromEdits });
+        return;
+      } catch (e) {
+        lastErr = e;
+      }
     }
+
+    // 解析失败：保留原 edits，不写空，避免把已保存的布局冲掉
+    showMsg(String((lastErr && lastErr.message) || lastErr || "无法解析"), true);
+    M.builtSig = M.pendSig = currentSig();
+    renderAll(); updateToolbar();
   }
 
   // AI 拆解结果（ui.mps_draft）写回 edits 后从这里重建画布
@@ -674,6 +704,8 @@ function init(node) {
       const b = document.createElement("div");
       b.className = "mps-box" + (M.sel === i ? " sel" : "");
       b.dataset.i = i;
+      // 图层顺序：数组 0 = 面板最上面 = 画面最前，所以 0 的 z-index 最大
+      b.style.zIndex = String(items.length - i);
       b.style.left = (x0 / Wd) * 100 + "%";
       b.style.top = (y0 / Hd) * 100 + "%";
       b.style.width = ((x1 - x0) / Wd) * 100 + "%";
@@ -752,8 +784,6 @@ function init(node) {
       M.inspPre = null;
     });
   }
-  const csvParse = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
-  const csvShow = (v) => (v || []).join(", ");
 
   // ---------- palette 色块编辑（对齐官方 layout 的 hex 数组语义）----------
   // summary.palette = 整图主配色倾向；items[].palette = 该元素自身配色。
@@ -1104,16 +1134,15 @@ function init(node) {
   }
 
   // 比例/像素规模组合换算：只选比例→保持当前面积；只选像素→保持当前比例；16 倍数取整
-  const snap16 = (v) => Math.max(16, Math.round(v / 16) * 16);
-
   function resizeLayoutTo(NW, NH) {
     const d = M.S.d;
+    NW = clampDim(NW); NH = clampDim(NH);
     pushUndo(snapshot());
     const sx = NW / d.width, sy = NH / d.height;
     d.items.forEach((it) => {
       const x0 = Math.round(it.bbox[0] * sx), x1 = Math.round(it.bbox[2] * sx);
       const y0 = Math.round(it.bbox[1] * sy), y1 = Math.round(it.bbox[3] * sy);
-      it.bbox = [x0, y0, x1 <= x0 ? x0 + 8 : x1, y1 <= y0 ? y0 + 8 : y1];
+      it.bbox = clampBox([x0, y0, x1, y1], NW, NH);
     });
     d.width = NW; d.height = NH;
     syncWidgets(); afterChange();
@@ -1190,7 +1219,7 @@ function init(node) {
       if (handle.includes("e")) x1 = Math.max(Math.min(sn(x1 + dx), d.width), x0 + MIN);
       if (handle.includes("n")) y0 = Math.min(Math.max(sn(y0 + dy), 0), y1 - MIN);
       if (handle.includes("s")) y1 = Math.max(Math.min(sn(y1 + dy), d.height), y0 + MIN);
-      it.bbox = [x0, y0, x1, y1];
+      it.bbox = clampBox([x0, y0, x1, y1], d.width, d.height);
     }
   }
 
@@ -1267,7 +1296,7 @@ function init(node) {
   // 否则中心落在半格点上时，逐档缩放会被四舍五入弹回原值，宽度卡死不动。
   // 停止滚动 500ms 后提交撤销快照 + 重渲染（重叠检测等）。
   canvasWrap.title = "点击框选中 · 拖拽移动 · 四角拉伸 · 选中后滚轮缩放";
-  let wheelUndoPre = null, wheelIdle = null, wheelGeom = null;
+  let wheelUndoPre = null, wheelIdle = null, wheelGeom = null, wheelIdx = null;
   canvasWrap.addEventListener("wheel", (e) => {
     if (!M.S || M.S.kind !== "layout") return; // caption 模式下滚轮行为交还页面
     // 目标框：悬停在某个框上 → 该框；空白处 → 当前选中框
@@ -1276,6 +1305,12 @@ function init(node) {
     if (i == null || !M.S.d.items[i]) return;
     e.preventDefault();
     e.stopPropagation(); // 别让 ComfyUI 画布跟着缩放
+    // 换到另一个框时先结束上一段缩放，否则会把上一个框的中心/尺寸套到新框上
+    if (wheelIdx !== null && wheelIdx !== i) {
+      if (wheelUndoPre != null) { commit(wheelUndoPre); wheelUndoPre = null; }
+      wheelGeom = null;
+    }
+    wheelIdx = i;
     if (M.sel !== i) select(i, true);
     const d = M.S.d, it = d.items[i];
     const snap = M.els.snapChk.checked;
@@ -1308,39 +1343,40 @@ function init(node) {
     writeEditsSoon();
     wheelIdle = setTimeout(() => {
       wheelGeom = null;
+      wheelIdx = null;
       if (wheelUndoPre != null) { commit(wheelUndoPre); wheelUndoPre = null; }
     }, 500);
   }, { passive: false });
 
-  // ---------- 生命周期钩子（链式保留原行为） ----------
-  // 工作流加载/恢复时 configure 会用保存的旧尺寸覆盖 init 设的高度，这里再兜一次底
-  const prevConfigure = node.onConfigure;
-  node.onConfigure = function (...a) {
-    const r = prevConfigure ? prevConfigure.apply(this, a) : undefined;
-    if (this.size[0] < 860 || this.size[1] < 900) {
-      this.size = [Math.max(this.size[0], 860), Math.max(this.size[1], 900)];
-    }
-    sanitizeAgentMd(this);
-    return r;
-  };
-  const prevResize = node.onResize;
-  node.onResize = function (...a) {
-    try { applyWidthPin(); layoutCanvas(); } catch (e) { /* noop */ }
-    if (prevResize) return prevResize.apply(this, a);
-  };
-  const prevRemove = node.onRemoved;
-  node.onRemoved = function (...a) {
-    clearInterval(M.timer);
-    clearTimeout(M.wt);
-    flushSubs.delete(flushEdits);
-    presetSubs.delete(onPresetsChanged);
-    if (M.apiHooked && M.apiRef && typeof M.apiRef.removeEventListener === "function") {
-      M.apiRef.removeEventListener("executed", onApiExecuted);
-      M.apiRef.removeEventListener("execution_error", onApiError);
-      M.apiRef.removeEventListener("status", onApiStatus);
-    }
-    if (prevRemove) return prevRemove.apply(this, a);
-  };
+  // ---------- 生命周期（由 comfy-hooks 统一链式挂载） ----------
+  mountEditorLifecycle(node, {
+    // 工作流恢复时 configure 先还原 widget 值再调 onConfigure：这里必须从 edits 重建，
+    // 否则 700ms 轮询会用 source 覆盖掉保存的布局（AI 拆解/画布编辑丢失）。
+    onConfigure: function () {
+      if (this.size[0] < 860 || this.size[1] < 900) {
+        this.size = [Math.max(this.size[0], 860), Math.max(this.size[1], 900)];
+      }
+      sanitizeAgentMd(this);
+      rebindWidgets();
+      rebuildFromWidgets({ preferEdits: true, write: false });
+    },
+    onResize: () => {
+      try { applyWidthPin(); layoutCanvas(); } catch (e) { /* noop */ }
+    },
+    onRemoved: () => {
+      clearInterval(M.timer);
+      clearTimeout(M.wt);
+      clearTimeout(M.editsCb);
+      clearTimeout(wheelIdle);
+      unregisterFlush();
+      presetSubs.delete(onPresetsChanged);
+      if (M.apiHooked && M.apiRef && typeof M.apiRef.removeEventListener === "function") {
+        M.apiRef.removeEventListener("executed", onApiExecuted);
+        M.apiRef.removeEventListener("execution_error", onApiError);
+        M.apiRef.removeEventListener("status", onApiStatus);
+      }
+    },
+  });
   // 执行结果处理：底图上屏 + AI 拆解写回。
   // 兼容两种消息形态（ui 字典本体 / 包一层 .ui）与两条投递路径（旧前端 onExecuted / 新前端 api 事件总线）
   let lastImgName = null;
@@ -1483,7 +1519,7 @@ function init(node) {
   M.apiHooked = false;
   M.apiRef = null;
   const tryHookApi = () => {
-    installQueueHook();
+    editorFlushRegistry.install(app);
     if (M.apiHooked) return true;
     const api = (typeof app !== "undefined" && app.api && typeof app.api.addEventListener === "function")
       ? app.api
@@ -1505,10 +1541,12 @@ function init(node) {
   // 瞬间重置回 caption 散文视图，等结果落地后由 rebuildFromEdits 接管。
   M.timer = setInterval(() => {
     tryHookApi();
+    rebindWidgets();
     try { applyWidthPin(); } catch (e) { /* noop */ }
     const sig = currentSig();
     if (sig === M.pendSig) {
-      if (sig !== M.builtSig && !M.splitBtn) { rebuildFromWidgets(); }
+      // source 改变时以 source 为准；edits 只作为 source 为空/加载恢复时的回退
+      if (sig !== M.builtSig && !M.splitBtn) { rebuildFromWidgets({ preferEdits: false }); }
     } else {
       M.pendSig = sig;
     }
@@ -1521,7 +1559,7 @@ function init(node) {
     }
   }, 700);
 
-  rebuildFromWidgets();
+  rebuildFromWidgets({ preferEdits: true, write: false });
   ensurePresets().then(() => fillPresetSelect(selPreset)).catch(() => {}); // 库已缓存时立即填充
 }
 
@@ -1579,181 +1617,12 @@ function initTranslator(node) {
   };
 }
 
-// 编译器节点：canvas_width/canvas_height 一旦连线，就把来源 Editor 的当前画布尺寸
-// 实时写进 Compiler 的 width/height widget——后端执行时本来就以连线为准，
-// 这里同步只是让界面显示与实际生效值一致，避免"连了 928×1648 却还显示 1024"。
-function initCompilerSizeSync(node) {
-  if (node._mpsSizeSync) return;
-  node._mpsSizeSync = true;
-
-  const getWidget = (n, name) => ((n && n.widgets) || []).find((w) => w.name === name);
-  if (!getWidget(node, "width") || !getWidget(node, "height")) return;
-
-  const graphOf = () => node.graph || (typeof app !== "undefined" && app.graph) || null;
-  const inputIndex = (name) => ((node.inputs) || []).findIndex((i) => i.name === name);
-  const linkById = (lid) => {
-    const g = graphOf();
-    if (!g || !g.links) return null;
-    const keys = [lid, String(lid)];
-    if (typeof g.links.get === "function") {
-      for (const k of keys) { const l = g.links.get(k); if (l) return l; }
-      return null;
-    }
-    if (Array.isArray(g.links)) {
-      return g.links.find((l) => l && (l.id === lid || String(l.id) === String(lid))) || null;
-    }
-    for (const k of keys) { if (g.links[k]) return g.links[k]; }
-    return null;
-  };
-  const nodeClass = (n) => (n.constructor && n.constructor.comfyClass) || n.comfyClass || n.type;
-  const nodeFromLink = (link) => {
-    if (!link) return null;
-    const g = graphOf();
-    const raw = link.origin_id;
-    return (g && (
-      (g.getNodeById && (g.getNodeById(raw) || g.getNodeById(String(raw)))) ||
-      (g._nodes_by_id && (g._nodes_by_id[raw] || g._nodes_by_id[String(raw)]))
-    )) || null;
-  };
-  const readInputLink = (n, name) => {
-    const idx = ((n && n.inputs) || []).findIndex((i) => i.name === name);
-    if (idx < 0) return null;
-    // 新版前端推荐 getInputLink（返回 Link 对象）；旧版回退到 input.link。
-    if (typeof n.getInputLink === "function") {
-      const l = n.getInputLink(idx);
-      if (!l) return null;
-      return typeof l === "object" ? l : linkById(l);
-    }
-    const lid = n.inputs[idx].link;
-    return lid == null ? null : linkById(lid);
-  };
-  const linkOf = (name) => readInputLink(node, name);
-  const snapEditorDim = (v) => Math.max(64, Math.min(15360, Math.round(v / 16) * 16));
-  const sourceWidgetValue = (name) => {
-    const src = nodeFromLink(linkOf(name));
-    if (!src) return null;
-    const cls = nodeClass(src);
-    if (cls === "MOSSEditor") {
-      // 优先读 edits 里的 layout 尺寸：比例/像素调整后它一定被重写，与画布结果同源；
-      // caption 形态的 edits 没有 width/height，再回落到 canvas_width/height widget。
-      const key = name === "canvas_width" ? "width" : "height";
-      const edits = getWidget(src, "edits");
-      if (edits && edits.value) {
-        try {
-          const d = JSON.parse(edits.value);
-          const v = Number(d && d[key]);
-          if (Number.isFinite(v)) return snapEditorDim(v);
-        } catch (e) { /* 非法 JSON：回落 widget */ }
-      }
-      const w = getWidget(src, name);
-      const v = w ? Number(w.value) : NaN;
-      return Number.isFinite(v) ? snapEditorDim(v) : null;
-    }
-    const names = name === "canvas_width" ? ["canvas_width", "width"] : ["canvas_height", "height"];
-    for (const n of names) {
-      const w = getWidget(src, n);
-      const v = w ? Number(w.value) : NaN;
-      if (Number.isFinite(v)) return v;
-    }
-    return null;
-  };
-
-  // 沿 draft 上游找 Editor：直接接 Editor，或经过 Translator（可多层）都认。
-  const upstreamEditor = () => {
-    let src = nodeFromLink(readInputLink(node, "draft"));
-    for (let depth = 0; depth < 4 && src; depth++) {
-      const cls = nodeClass(src);
-      if (cls === "MOSSEditor") return src;
-      if (cls !== "MOSSTranslator") return null;
-      src = nodeFromLink(readInputLink(src, "draft"));
-    }
-    return null;
-  };
-
-  // 旧工作流保存的 Compiler 没有 canvas_width/height 连线（甚至没有这两个输入槽），
-  // F5 后手动连线会丢。这里从 draft 上游自动补连线；已接好则不动，每轮最多尝试一次。
-  const autoWire = () => {
-    if (node._mpsAutoWired) return;
-    if (linkOf("canvas_width") && linkOf("canvas_height")) {
-      node._mpsAutoWired = true;
-      return;
-    }
-    const ed = upstreamEditor();
-    if (!ed) return;
-    const widthIdx = inputIndex("canvas_width");
-    const heightIdx = inputIndex("canvas_height");
-    const edWidth = ((ed.outputs) || []).findIndex((o) => o.name === "width");
-    const edHeight = ((ed.outputs) || []).findIndex((o) => o.name === "height");
-    let wired = false;
-    try {
-      if (!linkOf("canvas_width") && widthIdx >= 0 && edWidth >= 0) {
-        wired = !!ed.connect(edWidth, node, widthIdx) || wired;
-      }
-      if (!linkOf("canvas_height") && heightIdx >= 0 && edHeight >= 0) {
-        wired = !!ed.connect(edHeight, node, heightIdx) || wired;
-      }
-    } catch (e) { /* 下一轮再试 */ }
-    if (linkOf("canvas_width") && linkOf("canvas_height")) {
-      node._mpsAutoWired = true;
-      if (wired) console.log("[MOSS Studio] Compiler 已自动连接 Editor 尺寸输出", node.id);
-    }
-  };
-
-  let applying = false;
-  const syncOnce = () => {
-    if (applying) return;
-    applying = true;
-    let changed = false;
-    try {
-      autoWire();
-      // 每次轮询都重新取 widget：新版前端在工作流加载/配置过程中可能替换 widget 对象。
-      const pairs = [["width", "canvas_width"], ["height", "canvas_height"]];
-      for (const [targetName, sourceName] of pairs) {
-        const widget = getWidget(node, targetName);
-        if (!widget) continue;
-        const v = sourceWidgetValue(sourceName);
-        if (v == null) {
-          if (!node._mpsSyncWarned && linkOf(sourceName)) {
-            node._mpsSyncWarned = true;
-            console.warn("[MOSS Studio] Compiler 尺寸联动：已连线但读不到来源尺寸", node.id, sourceName);
-          }
-          continue;
-        }
-        if (Number(widget.value) !== v) { widget.value = v; changed = true; }
-      }
-      // 只更新界面显示；执行时后端本来就以连线值为准，不把工作流标记成"已修改"。
-      if (changed) {
-        if (!node._mpsSyncLogged) {
-          node._mpsSyncLogged = true;
-          console.log("[MOSS Studio] Compiler 尺寸联动已生效", node.id);
-        }
-        try { node.setDirtyCanvas(true, true); } catch (e) { /* noop */ }
-      }
-    } finally { applying = false; }
-  };
-
-  const timer = setInterval(syncOnce, 500);
-  const prevConfigure = node.onConfigure;
-  node.onConfigure = function (...a) {
-    const r = prevConfigure ? prevConfigure.apply(this, a) : undefined;
-    setTimeout(syncOnce, 0);
-    return r;
-  };
-  const prevRemoved = node.onRemoved;
-  node.onRemoved = function (...a) {
-    clearInterval(timer);
-    if (prevRemoved) return prevRemoved.apply(this, a);
-  };
-  setTimeout(syncOnce, 0);
-  console.log("[MOSS Studio] Compiler 尺寸联动监听已启动", node.id);
-}
-
 app.registerExtension({
   name: "MOSSPromptStudio.EditorCanvas",
   async nodeCreated(node) {
     const cls = (node.constructor && node.constructor.comfyClass) || node.comfyClass;
     if (cls === "MOSSEditor") init(node);
     else if (cls === "MOSSTranslator") initTranslator(node);
-    else if (cls === "MOSSCompiler") initCompilerSizeSync(node);
+    else if (cls === "MOSSCompiler") mountCompilerSync(node);
   },
 });

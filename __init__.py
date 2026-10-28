@@ -4,6 +4,8 @@
 """
 from .nodes import MOSSCompiler, MOSSEditor, MOSSTranslator
 
+__version__ = "1.5.0"
+
 NODE_CLASS_MAPPINGS = {
     "MOSSEditor": MOSSEditor,
     "MOSSTranslator": MOSSTranslator,
@@ -18,4 +20,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 WEB_DIRECTORY = "./web"
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+__all__ = ["__version__", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

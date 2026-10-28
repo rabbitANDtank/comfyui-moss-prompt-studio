@@ -198,8 +198,15 @@ def validate_compiled(c: dict) -> str:
         if not isinstance(it["caption"], str) or not it["caption"].strip():
             _fail(f"{pre}.caption 不能为空")
         b = it["bbox"]
-        if not isinstance(b, list) or len(b) != 4 or not all(_is_num(x) for x in b):
-            _fail(f"{pre}.bbox 必须是四个数字（yxyx 中心原点）")
+        if not isinstance(b, list) or len(b) != 4 or not all(
+            isinstance(x, int) and not isinstance(x, bool) for x in b
+        ):
+            _fail(f"{pre}.bbox 必须是四个整数（yxyx 中心原点）")
+        y0, x0, y1, x1 = b
+        if not y0 < y1:
+            _fail(f"{pre}.bbox y 顺序非法（y0 必须小于 y1）: {b}")
+        if not x0 < x1:
+            _fail(f"{pre}.bbox x 顺序非法（x0 必须小于 x1）: {b}")
         if it["label"] == "text" and (not isinstance(it.get("text"), str) or not it["text"].strip()):
             _fail(f"{pre} 是 text 元素，text 必填")
         if it["label"] != "text" and "text" in it:

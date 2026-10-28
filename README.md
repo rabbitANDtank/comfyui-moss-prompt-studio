@@ -1,5 +1,7 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
+当前版本：**v1.5.0**
+
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接 ComfyUI 原生 MOSS-Image 节点生图。
 
 ```
@@ -17,7 +19,20 @@ MOSSEditor ──draft_zh──> MOSSTranslator ──draft_en──> MOSSCompil
 
 > caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（推荐工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
 
-推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（完整的 Editor → Translator → Compiler → CLIPTextEncode → KSampler 文生图流；用到 rgthree、ComfyUI-Easy-Use、TESpeedMoss 等节点，缺失时用 ComfyUI Manager 安装）。
+推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（完整的 Editor → Translator → Compiler → CLIPTextEncode → KSampler 文生图流）。
+
+**推荐工作流依赖**（缺节点用 ComfyUI Manager 安装；模型可换官方 MOSS-Image 权重，但 CLIP/VAE 必须匹配）：
+
+| 类型 | 工作流中的文件/版本 | 放置/说明 |
+|---|---|---|
+| ComfyUI | 0.43+（工作流 core 节点记录 0.41–0.42） | 需要支持 `CLIPLoader` 的 `moss_image` 类型 |
+| 本插件 | MOSS Prompt Studio v1.4.1+ | Editor / Translator / Compiler |
+| UNet | `rayMossArtshoot_sftTurboV1.safetensors` | `ComfyUI/models/unet/`；可替换为官方 MOSS-Image-Base/SFT，采样参数按模型卡调整 |
+| CLIP | `moss/qwen3.5_9b_int8_convrot.safetensors` | `ComfyUI/models/clip/`，`CLIPLoader` 类型选 `moss_image` |
+| VAE | `moss/flux2-vae.safetensors` | `ComfyUI/models/vae/` |
+| rgthree-comfy | `8ff50e4…`（Seed；另含 Label / Fast Groups Bypasser） | Manager 安装，版本以工作流节点记录为准 |
+| ComfyUI-Easy-Use | `b0b47ca…` / `005c578…`（easy cleanGpuUsed / easy showAnything） | Manager 安装 |
+| TESpeedMoss | 工作流节点 218 | 按该节点包来源安装 |
 
 ## 安装
 
@@ -28,12 +43,16 @@ custom_nodes/comfyui-moss-prompt-studio/
 ├── __init__.py            # 节点注册 + WEB_DIRECTORY
 ├── nodes/                 # 三个节点（编辑器 / 翻译器 / 编译器）
 ├── py/                    # 编译器移植 / 三形态识别 / 翻译核心（可独立测试）
-├── web/js/editor_canvas.js# 画布前端扩展
+├── web/js/editor_canvas.js# 画布 View + 入口（DOM/拖拽/检查器/图层）
+├── web/js/editor/model.js # 纯解析/校验/序列化/几何（无 DOM/ComfyUI 依赖）
+├── web/js/editor/comfy-hooks.js # Queue/生命周期/Compiler 尺寸同步
 ├── agents/                # 可下拉选择的追加注入指令文件（附示例 cinematic-example.md）
 ├── AGENT.example.md       # 根目录默认注入文件的模板
 ├── config.example.json    # LLM 连接配置模板（复制为 config.json 使用）
 ├── examples/              # 推荐工作流 + 中文示例草稿
-├── tests/run_tests.py     # 离线测试（22 项）
+├── tests/run_tests.py     # Python 离线测试（25 项）
+├── tests/model.test.mjs   # 前端纯逻辑测试（8 项）
+├── tests/hooks.test.mjs   # 生命周期/自动接线测试（3 项）
 └── LICENSE                # MIT
 ```
 
@@ -69,7 +88,7 @@ custom_nodes/comfyui-moss-prompt-studio/
   - **重叠检测**：框重叠时给出一键"谁在前"按钮，自动往 caption 里追加官方要求的遮挡措辞（`，处于最前层，部分遮挡相邻元素` / `，被前方元素部分遮挡`）；
   - 比例 × 像素规模预设（像素档 0.25M/0.5M/1M/1.5M/2M/3M/4M，对应官方支持范围 0.25M–4M、推荐 1M/1.5M/2M；比例含 1:1、5:4、4:3、3:2、16:10、16:9、2:1、21:9、3:1 及对应竖版，官方允许任意比例，只要求宽高为 16 的倍数）；只选比例保持当前像素面积，只选像素规模保持当前比例，宽高自动取 16 倍数并等比缩放全部框；caption 形态没有框可缩放，直接改写 `canvas_width`/`canvas_height` 作为 AI 拆解目标；比例下拉里的“自定义宽高…”可直接输入任意 16 倍数尺寸；下拉框实时回显当前生效的比例/像素值；
   - 实时校验状态条（与编译器同一套规则）；
-  - **底图**：`underlay` 输入口回接生成图，执行后自动垫在画布下做对比；
+  - **底图**：`underlay` 输入口回接生成图，执行后自动垫在画布下做对比；注意同一工作流里把生成图直接接回 Editor 会形成依赖环，推荐先 SaveImage，再用 LoadImage 接 `underlay`，或另开一次对比运行；
   - "⧉复制"一键复制编辑后的草稿 JSON；"⟲重置"回到粘贴源；
   - **LLM 配置预设**（💾 保存 / 🗑 删除 / 下拉切换）：把 provider/base_url/model/api_key/temperature/thinking/timeout 存成命名预设，编辑器与翻译器共享同一个预设库（存在 ComfyUI userdata，`moss_studio_llm_presets.json`）。
 - **AI 拆解**（`ai_draft` 勾选，或直接点工具栏 **⚡拆解**）：source 是散文/caption 时调用 LLM（与翻译节点同一套连接配置）生成官方 layout 草稿（中文条目、1–6 个元素、自动处理遮挡措辞），结果写回 edits 并刷新画布；`ai_prompt` widget 可整体改写拆解指令。拆解进行中画布保持现状、按钮显示进度，完成自动刷新；失败/超时有明确提示。⚡拆解 只提交编辑器单节点，不跑整个工作流。
@@ -117,6 +136,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 - **追加而非替换**：内容包在 `<!-- MOSS-STUDIO:AGENT:BEGIN/END -->` 托管块标记里，追加在系统提示词（默认契约或 widget 改写后的契约）末尾；文件里标记之外的内容不注入，可用于记笔记；
 - 文件不存在/为空 = 完全不影响原行为；标记不成对、文件不存在会明确报错；
 - **自动替换**：每次执行都重新读盘——改文件内容、换下拉选项，下一次执行即刻生效，无需重启 ComfyUI。
+- **安全限制**：只接受 `agents/` 目录内的普通 `.md` 文件（拒绝符号链接），单文件上限 64 KB；根目录默认 `AGENT.md` 同样拒绝符号链接和超大文件。
 
 示例——`system_prompt`（整体替换契约）+ `AGENT.md`（追加）+ `extra_instructions`（逐次）三层叠加的最终系统提示词形态：
 
@@ -206,9 +226,18 @@ This batch: keep all product names in original Chinese pinyin.
 
 ```
 python tests/run_tests.py
+node --test tests/model.test.mjs tests/hooks.test.mjs
 ```
 
-覆盖官方口径编译（含官方文档给出的期望坐标）、三形态识别与反解往返、节点行为、翻译结构校验、endpoint/请求体组装、mock HTTP 下的成功/重试/失败路径。
+Python 覆盖官方口径编译（含官方文档给出的期望坐标）、三形态识别与反解往返、节点行为、翻译结构校验、endpoint/请求体组装、mock HTTP 下的成功/重试/失败路径。前端测试覆盖解析/校验/序列化/几何、Queue flush、生命周期链和 Compiler 自动接线；`model.js` 不依赖 DOM/ComfyUI，可在 Node 直接跑。
+
+## 前端结构
+
+- `web/js/editor/model.js`：纯数据层，负责解析、校验、序列化、尺寸/bbox 几何；无 DOM、无 `app`、无 widget。
+- `web/js/editor_canvas.js`：画布 View，负责渲染、拖拽/缩放/滚轮、检查器、图层和快捷键；只通过回调与数据层交互。
+- `web/js/editor/comfy-hooks.js`：ComfyUI 适配层，负责 Queue 前 flush、`onConfigure`/`onResize`/`onRemoved` 生命周期链、Compiler 尺寸同步与自动补线；不包含画布几何。
+
+> 状态规则：加载/恢复时 `edits` 优先；source 改变时 source 优先；解析失败保留原 `edits`，不再用空值覆盖。
 
 ## 排查 LLM 耗时
 

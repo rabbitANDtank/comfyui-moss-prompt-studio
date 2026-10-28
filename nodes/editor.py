@@ -50,9 +50,13 @@ class MOSSEditor:
     OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, source, canvas_width, canvas_height, edits, ai_draft=False, **kwargs):
+    def IS_CHANGED(cls, source, canvas_width, canvas_height, edits, ai_draft=False,
+                   underlay=None, **kwargs):
         import hashlib
 
+        if underlay is not None:
+            # 底图内容无法便宜地哈希；有底图时强制重跑，避免换图后仍显示旧预览
+            return float("nan")
         text = (edits or "").strip() or (source or "")
         if ai_draft and '"items"' not in text:
             # 散文+拆解模式：每次都真执行（按钮可反复触发，不受缓存影响）
@@ -105,7 +109,9 @@ class MOSSEditor:
                     "default": AGENT_DEFAULT,
                     "tooltip": "注入口⓪（追加注入）：默认读插件根目录 AGENT.md；可选 agents/ 目录下的 .md（下拉选择，新文件刷新页面后出现）；每次执行自动重读，改文件即刻生效；(不注入) 完全关闭",
                 }),
-                "underlay": ("IMAGE", {"tooltip": "底图（通常回接生成图）用于画布对比"}),
+                "underlay": ("IMAGE", {
+                    "tooltip": "底图（通常回接生成图）。注意：同一工作流里直接回接会形成依赖环；请先生成图，再 SaveImage → LoadImage 接 underlay，或另开一次对比运行",
+                }),
             },
         }
 
