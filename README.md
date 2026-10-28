@@ -15,7 +15,9 @@ MOSSEditor ──draft_zh──> MOSSTranslator ──draft_en──> MOSSCompil
                                           生成图可回接 Editor 当底图对比迭代
 ```
 
-> caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（示例工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
+> caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（推荐工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
+
+推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（完整的 Editor → Translator → Compiler → CLIPTextEncode → KSampler 文生图流；用到 rgthree、ComfyUI-Easy-Use、TESpeedMoss 等节点，缺失时用 ComfyUI Manager 安装）。
 
 ## 安装
 
@@ -30,7 +32,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 ├── agents/                # 可下拉选择的追加注入指令文件（附示例 cinematic-example.md）
 ├── AGENT.example.md       # 根目录默认注入文件的模板
 ├── config.example.json    # LLM 连接配置模板（复制为 config.json 使用）
-├── examples/              # 示例工作流 + 中文示例草稿
+├── examples/              # 推荐工作流 + 中文示例草稿
 ├── tests/run_tests.py     # 离线测试（22 项）
 └── LICENSE                # MIT
 ```
@@ -41,13 +43,14 @@ custom_nodes/comfyui-moss-prompt-studio/
 2. **贴入提示词**：把上游 agent 产出的**中文散文提示词**粘贴到 **MOSS 提示词编辑器 (Editor)** 的 `source` 框。
 3. **打开拆解**：把 Editor 的 `ai_draft` 改为 `true`。
 4. **执行拆解**：点 Editor 工具栏的 **⚡拆解**，等待生成带 bbox 的布局画布；之后可以直接拖动、改元素说明、调配色。
-5. **跑完整流程**：`Editor.draft → Translator.draft → Compiler.draft`；caption 形态建议把 Editor 的 `width`/`height` 接到 Compiler 的 `canvas_width`/`canvas_height`（示例工作流已接好）。改完元素说明后点 Queue 即可，最新的 `edits` 会自动写回。
+5. **跑完整流程**：`Editor.draft → Translator.draft → Compiler.draft`；caption 形态建议把 Editor 的 `width`/`height` 接到 Compiler 的 `canvas_width`/`canvas_height`（推荐工作流已接好）。改完元素说明后点 Queue 即可，最新的 `edits` 会自动写回。
 6. **接最后的文本/尺寸节点**（常见 MOSS-Image 文生图流）：
    - `Compiler.prompt`（或 `clip_text`，默认两者相同）→ **CLIPTextEncode** 的 `text`（正面提示词），它的 `clip` 接 MOSS-Image 的 CLIP 加载器，输出的 `CONDITIONING` 接采样器 `positive`。
    - `Compiler.negative` → 另一个 **CLIPTextEncode** 的 `text`（负面提示词），输出接采样器 `negative`；也可以直接用负面节点的 widget 文本。
    - `Compiler.width` / `height` → **EmptyLatentImage** 的 `width` / `height`（或原生 MOSS 采样节点的尺寸输入），必须与草稿尺寸一致。
    - 只有一个文本输入口时用 `clip_text`；勾选 `clip_include_negative` 会把负向词拼在其后。已经有独立负面编码器时不要勾选。
    - 不要把 `prompt` 再送进 **MOSS-Image Layout Prompt**：Compiler 已经输出编译后的 layout JSON，直接进 `CLIPTextEncode` 即可；Layout Prompt 是“自然语言 + Create Bounding Boxes”那条路线的节点。
+   - 完整接线可直接参考推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)。
 
 > 如果上游已经给出 layout 草稿 JSON，直接贴进 `source` 即可，不需要打开 `ai_draft`；纯文本散文才需要拆解。
 
