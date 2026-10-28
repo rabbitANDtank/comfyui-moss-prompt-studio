@@ -35,6 +35,16 @@ custom_nodes/comfyui-moss-prompt-studio/
 └── LICENSE                # MIT
 ```
 
+## 快速使用
+
+1. **配置模型**：复制 `config.example.json` 为 `config.json`，填好 `mimo` / `deepseek` / `custom` 的 `base_url`、`model`、`api_key`；也可以直接在 Editor / Translator 节点的 `provider`、`base_url`、`model`、`api_key` 里填（节点值优先）。
+2. **贴入提示词**：把上游 agent 产出的**中文散文提示词**粘贴到 **MOSS 提示词编辑器 (Editor)** 的 `source` 框。
+3. **打开拆解**：把 Editor 的 `ai_draft` 改为 `true`。
+4. **执行拆解**：点 Editor 工具栏的 **⚡拆解**，等待生成带 bbox 的布局画布；之后可以直接拖动、改元素说明、调配色。
+5. **跑完整流程**：`Editor.draft → Translator.draft → Compiler.draft`，再把 `Compiler.prompt / width / height` 接到 MOSS-Image 采样节点；caption 形态建议把 Editor 的 `width`/`height` 接到 Compiler 的 `canvas_width`/`canvas_height`（示例工作流已接好）。改完元素说明后点 Queue 即可，最新的 `edits` 会自动写回。
+
+> 如果上游已经给出 layout 草稿 JSON，直接贴进 `source` 即可，不需要打开 `ai_draft`；纯文本散文才需要拆解。
+
 ## 节点说明
 
 ### 1. MOSS 提示词编辑器（MOSSEditor）
