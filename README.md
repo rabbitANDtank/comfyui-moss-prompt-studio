@@ -209,7 +209,6 @@ python tests/run_tests.py
 ## 设计依据与致谢
 
 - 编译器与校验规则移植自 [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 官方 skill（`skills/moss-image-prompt-enhancer`），保证与官方口径一致。
-- 分辨率口径取自官方 `USERGUIDE.md`：支持 0.25M（512×512）到 4M（2K）像素总量，推荐 1M/1.5M/2M；比例任意，宽高必须是 16 的正整数倍。
 - 画布交互改编自 [swan7-py/json-prompt-visualizer](https://github.com/swan7-py/json-prompt-visualizer) 的 canvas.py（拖拽/缩放/撤销/重叠闸门/坐标换算思路），适配为 ComfyUI 前端扩展。
 - 指令文件的追加注入语义参考了 [Codex-X](https://github.com/yynxxxxx/Codex-X) 的 Append 托管块设计。
 
