@@ -1,6 +1,6 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-把上游 agent 产出的**中文 MOSS-Image 提示词草稿**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接 ComfyUI 原生 MOSS-Image 节点生图。
+把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接 ComfyUI 原生 MOSS-Image 节点生图。
 
 ```
 [其他设备] agent + MOSS官方skill ──产──> 中文草稿 JSON (caption 或 layout)
