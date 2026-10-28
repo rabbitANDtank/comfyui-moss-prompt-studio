@@ -1,0 +1,20 @@
+# 真实密钥配置，绝不能进仓库
+config.json
+
+# 用户本地持久化指令（个人内容，不进仓库）
+AGENT.md
+
+# agents/ 目录：用户自建的个人指令文件不进仓库，仅保留自带示例
+agents/*
+!agents/cinematic-example.md
+
+# Python
+__pycache__/
+*.pyc
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

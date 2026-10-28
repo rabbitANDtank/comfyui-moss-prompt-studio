@@ -1,0 +1,13 @@
+{
+  "mimo": {
+    "base_url": "http://your-intranet-host:8000/v1",
+    "model": "MiMo",
+    "api_key": "EMPTY"
+  },
+  "deepseek": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "",
+    "api_key": "sk-put-your-deepseek-key-here"
+  },
+  "custom": {}
+}
