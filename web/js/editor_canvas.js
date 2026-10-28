@@ -116,8 +116,35 @@ const PRESET_KEYS = ["provider", "base_url", "model", "api_key", "temperature", 
 const UD_PATH = "/userdata/moss_studio_llm_presets.json";
 let PRESETS = null;
 const presetSubs = new Set();
+// 所有 Editor 的“立即写回 edits”函数；Queue 前统一 flush，避免手动改文字后仍用旧草稿。
+const flushSubs = new Set();
+let queueHookInstalled = false;
 
 const getApi = () => (typeof app !== "undefined" && app.api) || (typeof window !== "undefined" && window.app && window.app.api);
+
+function flushAllEdits() {
+  for (const fn of flushSubs) {
+    try { fn(); } catch (e) { /* noop */ }
+  }
+}
+
+// 点击 Queue 时 ComfyUI 会先序列化节点 widget；Inspector 的 300ms 防抖可能还没写回，
+// 这里在 app.queuePrompt 外面包一层，提交前把所有 Editor 的当前状态强制写进 edits。
+function installQueueHook() {
+  if (queueHookInstalled) return;
+  if (typeof app === "undefined" || !app || typeof app.queuePrompt !== "function") return;
+  queueHookInstalled = true;
+  const orig = app.queuePrompt;
+  app.queuePrompt = function (...args) {
+    flushAllEdits();
+    return orig.apply(this, args);
+  };
+}
+installQueueHook();
+// Ctrl/Cmd+Enter 是常用的 Queue 快捷键；在输入框里按也不会触发 blur，这里补一道 flush。
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") flushAllEdits();
+}, true);
 
 function broadcastPresets() {
   const list = PRESETS || [];
@@ -553,6 +580,11 @@ function init(node) {
     clearTimeout(M.wt);
     M.wt = setTimeout(writeEdits, 300);
   };
+  const flushEdits = () => {
+    clearTimeout(M.wt);
+    try { writeEdits(); } catch (e) { /* noop */ }
+  };
+  flushSubs.add(flushEdits);
 
   function showMsg(text, isErr) {
     msg.className = "mps-msg" + (isErr ? " err" : "");
@@ -714,6 +746,8 @@ function init(node) {
       writeEditsSoon();
     });
     el.addEventListener("blur", () => {
+      // 点 Queue 会先触发 blur：立刻写回，不能等 300ms 防抖
+      writeEdits();
       if (M.inspPre != null && snapshot() !== M.inspPre) { pushUndo(M.inspPre); updateToolbar(); }
       M.inspPre = null;
     });
@@ -746,6 +780,7 @@ function init(node) {
           afterLightChange();
         });
         inp.addEventListener("blur", () => {
+          writeEdits();
           if (M.inspPre != null && snapshot() !== M.inspPre) { pushUndo(M.inspPre); updateToolbar(); }
           M.inspPre = null;
         });
@@ -987,6 +1022,7 @@ function init(node) {
   capBox.addEventListener("focus", () => { M.inspPre = M.S ? snapshot() : null; });
   capBox.addEventListener("input", () => { if (M.S && M.S.kind === "caption") { M.S.caption = capBox.value; updateStatus(); writeEditsSoon(); } });
   capBox.addEventListener("blur", () => {
+    writeEdits();
     if (M.inspPre != null && M.S && snapshot() !== M.inspPre) { pushUndo(M.inspPre); updateToolbar(); }
     M.inspPre = null;
   });
@@ -1296,6 +1332,7 @@ function init(node) {
   node.onRemoved = function (...a) {
     clearInterval(M.timer);
     clearTimeout(M.wt);
+    flushSubs.delete(flushEdits);
     presetSubs.delete(onPresetsChanged);
     if (M.apiHooked && M.apiRef && typeof M.apiRef.removeEventListener === "function") {
       M.apiRef.removeEventListener("executed", onApiExecuted);
@@ -1446,6 +1483,7 @@ function init(node) {
   M.apiHooked = false;
   M.apiRef = null;
   const tryHookApi = () => {
+    installQueueHook();
     if (M.apiHooked) return true;
     const api = (typeof app !== "undefined" && app.api && typeof app.api.addEventListener === "function")
       ? app.api

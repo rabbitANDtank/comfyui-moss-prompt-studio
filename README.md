@@ -54,7 +54,7 @@ custom_nodes/comfyui-moss-prompt-studio/
   - "⧉复制"一键复制编辑后的草稿 JSON；"⟲重置"回到粘贴源；
   - **LLM 配置预设**（💾 保存 / 🗑 删除 / 下拉切换）：把 provider/base_url/model/api_key/temperature/thinking/timeout 存成命名预设，编辑器与翻译器共享同一个预设库（存在 ComfyUI userdata，`moss_studio_llm_presets.json`）。
 - **AI 拆解**（`ai_draft` 勾选，或直接点工具栏 **⚡拆解**）：source 是散文/caption 时调用 LLM（与翻译节点同一套连接配置）生成官方 layout 草稿（中文条目、1–6 个元素、自动处理遮挡措辞），结果写回 edits 并刷新画布；`ai_prompt` widget 可整体改写拆解指令。拆解进行中画布保持现状、按钮显示进度，完成自动刷新；失败/超时有明确提示。⚡拆解 只提交编辑器单节点，不跑整个工作流。
-- **edits**（自动写回）：画布每次编辑自动写进这个 widget，**非空时优先进 source**；编辑状态随工作流保存/重载/API 无头运行不丢。caption 形态退化为文本编辑。
+- **edits**（自动写回）：画布每次编辑自动写进这个 widget，**非空时优先进 source**；检查器里的文字修改在失焦、点击 Queue 或按 Ctrl/Cmd+Enter 前会立即 flush，确保下游翻译/编译节点拿到最新说明；编辑状态随工作流保存/重载/API 无头运行不丢。caption 形态退化为文本编辑。
 - 输出：`draft`（编辑后草稿 JSON，STRING）、`width`/`height`（当前画布尺寸，INT；layout 取草稿尺寸，caption 取 `canvas_width`/`canvas_height` 并对齐 16 倍数）。把这两个输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入口，caption 形态的生图尺寸也会与画布一致，且 Compiler 的 width/height 显示会自动跟随。
 
 ### 2. MOSS 提示词翻译器（MOSSTranslator）
