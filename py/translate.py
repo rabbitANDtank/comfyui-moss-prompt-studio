@@ -4,14 +4,21 @@
 - 翻译只允许动 caption / meta / tags / palette 的描述性文字；
   text（画面可见文字）、bbox、label、键名、枚举、宽高必须逐字保留。
 - 校验失败/HTTP 失败 → 把错误信息拼回对话重试（最多 2 次）→ 仍失败抛异常红字。
-- thinking: deepseek 走模型切换（off→deepseek-chat，开→deepseek-reasoner）；
-  mimo/custom 发 reasoning_effort；任何没映射对的参数用 extra_body 兜底（最后合并、可覆盖一切）。
+- thinking:
+  - deepseek：off → reasoning_effort="none"（不显式关闭时 DeepSeek flash 默认仍会思考）；
+    low/medium/high → low/high/max。
+  - mimo：thinking.type 二值开关（off → disabled，其余 → enabled）。官方 mimo-v2.6-* 默认开启
+    深度思考，所以 off 必须显式发；开启时 temperature/top_p 会被服务端强制忽略。
+  - custom：非 off 时发 reasoning_effort；部署不认该参数就用 extra_body 兜底
+    （最后合并、可覆盖一切）。
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -181,13 +188,21 @@ def build_body(model: str, temperature: float, thinking: str, provider: str, ext
         # 显式给足输出预算：默认 4096 会被思考过程的推理 token 吃掉，导致正文被截断成非法 JSON
         "max_tokens": 16384,
     }
-    if thinking != "off":
-        if provider == "deepseek":
-            # DeepSeek effort 档位为 low/high/max，无 medium
-            body["reasoning_effort"] = {"low": "low", "medium": "high", "high": "max"}[thinking]
-        else:
-            # OpenAI 风格 reasoning_effort；部署不认这个参数时，用 extra_body 覆盖成实际支持的形态
-            body["reasoning_effort"] = thinking
+    if provider == "mimo":
+        # MiMo 官方：mimo-v2.6-* 默认开启深度思考，thinking.type 是二值开关（没有档位）。
+        # 不显式 disabled 时，即使节点选 off 模型也会先思考，拆解/翻译会慢数倍。
+        body["thinking"] = {"type": "enabled" if thinking != "off" else "disabled"}
+        # MiMo 用 max_completion_tokens 限制“思考 + 正文”的总长度；max_tokens 单独给不准
+        body["max_completion_tokens"] = body["max_tokens"]
+    elif provider == "deepseek":
+        # DeepSeek 不传 effort 时默认仍会思考；off 必须显式 none 才是真的关闭
+        # effort 档位为 low/high/max，无 medium
+        body["reasoning_effort"] = "none" if thinking == "off" else {
+            "low": "low", "medium": "high", "high": "max",
+        }[thinking]
+    elif thinking != "off":
+        # custom：OpenAI 风格 reasoning_effort；部署不认这个参数时用 extra_body 覆盖
+        body["reasoning_effort"] = thinking
     extra = (extra_body or "").strip()
     if extra:
         try:
@@ -214,22 +229,28 @@ def _llm_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def chat(base_url: str, api_key: str, body: dict, timeout: int) -> str:
+def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -> str:
     """POST {base_url}/chat/completions，返回 message.content。"""
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
+    host = url.split("//")[-1].split("/")[0]
+    prefix = "[MOSS Studio] LLM" + (f" {tag}" if tag else "")
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     key = (api_key or "").strip()
     if key and key != "EMPTY":
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    t0 = time.perf_counter()
     try:
         with _llm_opener().open(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:500]
+        print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
+              f"model={body.get('model')} thinking={body.get('thinking')} "
+              f"effort={body.get('reasoning_effort')} HTTP {e.code}", flush=True)
         raise TranslationError(f"HTTP {e.code} [{url}]: {detail}") from e
     except urllib.error.URLError as e:
         raise TranslationError(f"连接失败 [{url}]（检查 base_url/网络/服务是否在跑）: {e.reason}") from e
@@ -242,10 +263,21 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int) -> str:
         content = msg.get("content") or ""
         finish = payload["choices"][0].get("finish_reason")
     except (KeyError, IndexError, TypeError) as e:
+        # 保留原始异常上下文，同时把耗时和请求参数关键项打到 ComfyUI 控制台
+        print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
+              f"model={body.get('model')} thinking={body.get('thinking')} "
+              f"effort={body.get('reasoning_effort')} 响应缺少 choices", flush=True)
         raise TranslationError(
             "响应缺少 choices[0].message.content: "
             + json.dumps(payload, ensure_ascii=False)[:300]
         ) from e
+    usage = payload.get("usage") or {}
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
+          f"model={body.get('model')} thinking={body.get('thinking')} "
+          f"effort={body.get('reasoning_effort')} finish={finish} "
+          f"completion={usage.get('completion_tokens')} "
+          f"reasoning={reasoning if reasoning is not None else '-'}", flush=True)
     if not content.strip():
         raise TranslationError("模型返回了空 content")
     if finish == "length":
@@ -452,11 +484,13 @@ def translate(src_info: dict, *, base_url: str, api_key: str, body: dict,
     for attempt in range(1 + MAX_RETRY):
         body["messages"] = list(base_messages)
         try:
-            raw = chat(base_url, api_key, body, timeout)
+            raw = chat(base_url, api_key, body, timeout,
+                       tag=f"translate attempt={attempt + 1}/{1 + MAX_RETRY}")
             last_raw = raw
             out = extract_json(raw)
             return check_translation(src_info, out)
         except Exception as e:  # 统一进入重试：HTTP 错误 / JSON 解析 / 结构校验
+            print(f"[MOSS Studio] 翻译 attempt={attempt + 1} 失败: {str(e)[:300]}", flush=True)
             last_err = e
             if attempt < MAX_RETRY:
                 base_messages = base_messages + [
@@ -517,6 +551,125 @@ def _forgive_llm_sloppiness(obj):
     return obj
 
 
+_AI_TOP_KEYS = {"width", "height", "bbox_coord_space", "bbox_format", "summary", "items"}
+_AI_SUMMARY_KEYS = {"caption", "meta", "canvas", "palette"}
+_AI_ITEM_KEYS = {"label", "caption", "bbox", "text", "tags", "palette"}
+
+
+def _as_num(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+    elif isinstance(v, str):
+        try:
+            f = float(v.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _repair_ai_draft(obj, width: int, height: int, fallback_caption: str = ""):
+    """仅用于 AI 拆解：把模型的常见偏差就地修掉，避免为了一个坏框整轮重试。
+
+    - 删除 schema 外的顶层/元素字段（模型常多加 text/type/description）
+    - 宽高/坐标口径强制改成目标画布；模型给了别的宽高时按比例缩放 bbox
+    - bbox 排序、缩放并夹取到画布内，保证 x0<x1、y0<y1
+    - 非 text 元素误带的 text 字段删掉
+    结构与必填字段（caption/label/text）仍交给官方校验；修不好就继续重试。
+    """
+    if not isinstance(obj, dict):
+        return obj
+    notes = []
+    # 模型常把 summary 的字段直接放到顶层；先收好，删完多余字段后再重建 summary
+    src_summary = obj.get("summary")
+    stray = {k: obj.get(k) for k in _AI_SUMMARY_KEYS if k in obj}
+
+    for k in list(obj):
+        if k not in _AI_TOP_KEYS:
+            obj.pop(k, None)
+            notes.append(f"顶层.{k}")
+
+    src_w, src_h = _as_num(obj.get("width")), _as_num(obj.get("height"))
+    scale_x = width / src_w if src_w and src_w > 0 else 1.0
+    scale_y = height / src_h if src_h and src_h > 0 else 1.0
+    if src_w and src_h and (abs(src_w - width) > 1 or abs(src_h - height) > 1):
+        notes.append(f"宽高 {src_w:g}x{src_h:g}→{width}x{height}")
+
+    obj["width"], obj["height"] = int(width), int(height)
+    obj["bbox_coord_space"], obj["bbox_format"] = "abs", "xyxy"
+
+    s = obj.get("summary")
+    if isinstance(s, dict):
+        # 顶层散落的 caption/meta/canvas/palette 收回 summary
+        for k, v in stray.items():
+            if k not in s and v is not None:
+                s[k] = v
+                notes.append(f"summary.{k}←顶层")
+        for k in list(s):
+            if k not in _AI_SUMMARY_KEYS:
+                s.pop(k, None)
+                notes.append(f"summary.{k}")
+        if fallback_caption and not str(s.get("caption") or "").strip():
+            s["caption"] = fallback_caption.strip()
+            notes.append("summary.caption 用原文兜底")
+    else:
+        # summary 整个缺失或不是对象：用顶层字段重建
+        rebuilt = {}
+        if isinstance(src_summary, str) and src_summary.strip():
+            rebuilt["caption"] = src_summary.strip()
+        for k, v in stray.items():
+            if v is not None and k not in rebuilt:
+                rebuilt[k] = v
+        if not rebuilt.get("caption") and fallback_caption.strip():
+            rebuilt["caption"] = fallback_caption.strip()
+            notes.append("summary 用原文兜底")
+        if rebuilt:
+            obj["summary"] = rebuilt
+            notes.append("summary 由顶层字段重建")
+
+    items = obj.get("items")
+    if isinstance(items, list):
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                continue
+            for k in list(it):
+                if k not in _AI_ITEM_KEYS:
+                    it.pop(k, None)
+                    notes.append(f"items[{i}].{k}")
+            if it.get("label") != "text" and "text" in it:
+                it.pop("text", None)
+                notes.append(f"items[{i}].text")
+            b = it.get("bbox")
+            if not isinstance(b, list) or len(b) != 4:
+                continue
+            nums = [_as_num(v) for v in b]
+            if any(v is None for v in nums):
+                continue
+            x0, y0, x1, y1 = nums
+            x0, x1 = min(x0, x1) * scale_x, max(x0, x1) * scale_x
+            y0, y1 = min(y0, y1) * scale_y, max(y0, y1) * scale_y
+            ix0 = max(0, min(width - 1, int(round(x0))))
+            ix1 = max(0, min(width, int(round(x1))))
+            iy0 = max(0, min(height - 1, int(round(y0))))
+            iy1 = max(0, min(height, int(round(y1))))
+            if ix1 <= ix0:
+                ix1 = min(width, ix0 + 8)
+            if iy1 <= iy0:
+                iy1 = min(height, iy0 + 8)
+            nb = [ix0, iy0, ix1, iy1]
+            if nb != b:
+                notes.append(f"items[{i}].bbox")
+            it["bbox"] = nb
+
+    if notes:
+        print("[MOSS Studio] AI 拆解已本地修复: " + ", ".join(notes[:8])
+              + (" …" if len(notes) > 8 else ""), flush=True)
+    return obj
+
+
 def prose_to_layout(prose: str, *, width: int, height: int, base_url: str, api_key: str,
                     model: str, temperature: float, thinking: str, provider: str,
                     timeout: int, system_prompt: str = "", agent_md: str = "") -> dict:
@@ -534,12 +687,16 @@ def prose_to_layout(prose: str, *, width: int, height: int, base_url: str, api_k
     for attempt in range(1 + MAX_RETRY):
         body["messages"] = list(base_messages)
         try:
-            raw = chat(base_url, api_key, body, timeout)
+            raw = chat(base_url, api_key, body, timeout,
+                       tag=f"draft attempt={attempt + 1}/{1 + MAX_RETRY}")
             last_raw = raw
             out = _forgive_llm_sloppiness(extract_json(raw))
+            out = _repair_ai_draft(out, width, height, fallback_caption=prose)
             validate_draft(out)
             return out
         except Exception as e:  # HTTP / JSON / 草稿校验 统一重试
+            print(f"[MOSS Studio] AI 拆解 attempt={attempt + 1} 失败: {str(e)[:300]} "
+                  f"| 输出开头: {last_raw[:160]!r}", flush=True)
             last_err = e
             if attempt < MAX_RETRY:
                 base_messages = base_messages + [

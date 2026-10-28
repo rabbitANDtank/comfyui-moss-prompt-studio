@@ -56,7 +56,7 @@ class MOSSTranslator:
                 }),
                 "model": ("STRING", {
                     "default": "",
-                    "tooltip": "留空则读 config.json / provider 预设（deepseek: chat/reasoner 按 thinking 自动切）",
+                    "tooltip": "留空则读 config.json / provider 预设（deepseek 默认 deepseek-chat）",
                 }),
                 "api_key": ("STRING", {
                     "default": "EMPTY",
@@ -65,7 +65,7 @@ class MOSSTranslator:
                 "temperature": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "thinking": (["off", "low", "medium", "high"], {
                     "default": "off",
-                    "tooltip": "deepseek: off→deepseek-chat, 开→deepseek-reasoner；mimo/custom: 发 reasoning_effort（不认就用 extra_body 改）",
+                    "tooltip": "off 会显式关闭思考（deepseek: reasoning_effort=none；mimo: thinking.type=disabled）。deepseek 档位 low→low/medium→high/high→max；mimo 只有开/关，low/medium/high 同为开启；custom 非 off 发 reasoning_effort，不认就用 extra_body 改",
                 }),
                 "timeout": ("INT", {"default": 180, "min": 10, "max": 1200}),
                 "system_prompt": ("STRING", {

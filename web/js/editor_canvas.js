@@ -10,13 +10,18 @@
  */
 import { app } from "/scripts/app.js";
 
-console.log("[MOSS Studio] Editor 画布扩展已加载");
+console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
 
 const NODE_CLASS = "MOSSEditor";
 const COLORS = { object: "#9d86f0", character: "#3ec27f", text: "#5aa9f5" };
-const RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9", "2:1", "1:2"];
-// 像素规模预设：对齐 MOSS 生态常用档（swan7 canvas 的 --mp 同款）
-const MP_OPTS = [["1", "1M"], ["1.5", "1.5M"], ["2", "2M"], ["4", "4M"]];
+// 官方口径：比例任意，只要求宽高为 16 的正整数倍；这里列常用比例，换算后自动对齐 16。
+const RATIOS = [
+  "1:1",
+  "5:4", "4:3", "3:2", "16:10", "16:9", "2:1", "21:9", "3:1",
+  "4:5", "3:4", "2:3", "10:16", "9:16", "1:2", "1:3",
+];
+// 官方口径：支持 0.25M（512×512）到 4M（2K），推荐 1M / 1.5M / 2M。
+const MP_OPTS = [["0.25", "0.25M"], ["0.5", "0.5M"], ["1", "1M"], ["1.5", "1.5M"], ["2", "2M"], ["3", "3M"], ["4", "4M"]];
 const OCCL_FRONT = "，处于最前层，部分遮挡相邻元素";
 const OCCL_BACK = "，被前方元素部分遮挡";
 const VALID_LABELS = ["object", "character", "text"];
@@ -314,14 +319,20 @@ function init(node) {
   selRatio.className = "mps-size";
   selRatio.appendChild(new Option("比例…", ""));
   RATIOS.forEach((r) => selRatio.appendChild(new Option(r, r)));
-  selRatio.title = "换比例，保持当前像素面积（当前值显示在框上）";
-  selRatio.addEventListener("change", () => { applyResize(selRatio.value, null); selRatio.value = ""; refreshSizeSelectors(); });
+  selRatio.appendChild(new Option("自定义宽高…", "__custom__"));
+  selRatio.title = "换比例，保持当前像素面积（当前值显示在框上）；官方支持任意比例，宽高自动取 16 倍数；也可选“自定义宽高…”直接输入任意 16 倍数尺寸";
+  selRatio.addEventListener("change", () => {
+    if (selRatio.value === "__custom__") applyCustomSize();
+    else applyResize(selRatio.value, null);
+    selRatio.value = "";
+    refreshSizeSelectors();
+  });
   toolbar.appendChild(selRatio);
   const selMP = document.createElement("select");
   selMP.className = "mps-size";
   selMP.appendChild(new Option("像素…", ""));
   MP_OPTS.forEach(([v, t]) => selMP.appendChild(new Option(t, v)));
-  selMP.title = "换像素规模（百万像素），保持当前比例（当前值显示在框上）";
+  selMP.title = "换像素规模（百万像素），保持当前比例（当前值显示在框上）；官方范围 0.25M–4M，推荐 1M/1.5M/2M";
   selMP.addEventListener("change", () => { applyResize(null, selMP.value); selMP.value = ""; refreshSizeSelectors(); });
   toolbar.appendChild(selMP);
   const snapChk = document.createElement("input");
@@ -917,7 +928,7 @@ function init(node) {
     const errs = validateJS(M.S);
     if (!M.S) { status.className = "mps-status"; status.textContent = "—"; return; }
     const head = M.S.kind === "caption"
-      ? `caption · ${M.S.caption.length} 字` + (wAi && wAi.value ? ` · ⚡AI 拆解已启用（目标 ${+wCw.value || 1024}×${+wCh.value || 1024}）：Queue 一次生成布局画布` : "")
+      ? `caption · ${M.S.caption.length} 字 · 目标 ${+wCw.value || 1024}×${+wCh.value || 1024}` + (wAi && wAi.value ? " · ⚡AI 拆解已启用：Queue 一次生成布局画布" : "")
       : `布局 ${M.S.d.width}×${M.S.d.height} · ${M.S.d.items.length} 项 · 选中 ${M.sel == null ? "—" : M.sel}`;
     if (errs.length) {
       status.className = "mps-status err";
@@ -941,7 +952,14 @@ function init(node) {
     const gcd = (a, b) => (b ? gcd(b, a % b) : a);
     const G = gcd(W, H) || 1;
     const ratioStr = `${W / G}:${H / G}`;
-    selRatio.options[0].text = "比例 " + (RATIOS.includes(ratioStr) || ratioStr.length <= 7 ? ratioStr : "自定义");
+    // 16 倍数取整会偏离目标比例（如 16:10 变成 79:49），按 3% 容差回显最接近的预设名。
+    const actual = W / H;
+    const hitRatio = RATIOS.find((r) => {
+      const [rw, rh] = r.split(":").map(Number);
+      const target = rw / rh;
+      return Math.abs(actual - target) <= target * 0.03;
+    });
+    selRatio.options[0].text = "比例 " + (hitRatio || (ratioStr.length <= 7 ? ratioStr : "自定义"));
     const mp = (W * H) / 1e6;
     const hit = MP_OPTS.find(([v]) => Math.abs(Number(v) - mp) <= 0.12);
     selMP.options[0].text = "像素 " + (hit ? hit[1] : mp.toFixed(2) + "M");
@@ -1051,20 +1069,9 @@ function init(node) {
 
   // 比例/像素规模组合换算：只选比例→保持当前面积；只选像素→保持当前比例；16 倍数取整
   const snap16 = (v) => Math.max(16, Math.round(v / 16) * 16);
-  function applyResize(ratioKey, mpVal) {
-    if (!M.S || M.S.kind !== "layout") return;
-    if (!ratioKey && !mpVal) return;
+
+  function resizeLayoutTo(NW, NH) {
     const d = M.S.d;
-    let ratio = d.width / d.height;
-    if (ratioKey) {
-      const [rw, rh] = ratioKey.split(":").map(Number);
-      ratio = rw / rh;
-    }
-    const area = mpVal ? Number(mpVal) * 1000000 : d.width * d.height;
-    const NW = snap16(Math.sqrt(area * ratio));
-    const NH = snap16(Math.sqrt(area / ratio));
-    if (NW === d.width && NH === d.height) return;
-    if (!confirm(`画布调整为 ${NW}×${NH}（≈${(NW * NH / 1000000).toFixed(2)}M）并等比缩放所有框？`)) return;
     pushUndo(snapshot());
     const sx = NW / d.width, sy = NH / d.height;
     d.items.forEach((it) => {
@@ -1074,6 +1081,60 @@ function init(node) {
     });
     d.width = NW; d.height = NH;
     syncWidgets(); afterChange();
+  }
+
+  // 自定义宽高：官方允许任意尺寸，只要宽高是 16 的正整数倍。
+  function applyCustomSize() {
+    if (!M.S) return;
+    const isLayout = M.S.kind === "layout";
+    const d = isLayout ? M.S.d : null;
+    const curW = d ? d.width : (+wCw.value || 1024);
+    const curH = d ? d.height : (+wCh.value || 1024);
+    const raw = prompt("输入宽×高（16 的倍数，64–15360），如 1536x1024：", `${curW}x${curH}`);
+    if (raw == null || !String(raw).trim()) return;
+    const m = String(raw).trim().match(/^(\d+)\s*[x×*,\s]\s*(\d+)$/i);
+    if (!m) { showMsg("尺寸格式应为 宽x高，如 1536x1024", true); return; }
+    const NW = Number(m[1]), NH = Number(m[2]);
+    if (!Number.isInteger(NW) || !Number.isInteger(NH) || NW < 64 || NH < 64
+        || NW > 15360 || NH > 15360 || NW % 16 || NH % 16) {
+      showMsg("宽高必须是 64–15360 之间、16 的整数倍", true);
+      return;
+    }
+    if (NW === curW && NH === curH) { hideMsg(); return; }
+    if (!isLayout) {
+      wCw.value = NW; wCh.value = NH;
+      syncWidgets(); renderAll(); hideMsg();
+      return;
+    }
+    if (!confirm(`画布调整为 ${NW}×${NH}（≈${(NW * NH / 1000000).toFixed(2)}M）并等比缩放所有框？`)) return;
+    resizeLayoutTo(NW, NH);
+    hideMsg();
+  }
+
+  function applyResize(ratioKey, mpVal) {
+    if (!M.S) return;
+    if (!ratioKey && !mpVal) return;
+    const isLayout = M.S.kind === "layout";
+    const d = isLayout ? M.S.d : null;
+    const curW = d ? d.width : (+wCw.value || 1024);
+    const curH = d ? d.height : (+wCh.value || 1024);
+    let ratio = curW / curH;
+    if (ratioKey) {
+      const [rw, rh] = ratioKey.split(":").map(Number);
+      ratio = rw / rh;
+    }
+    const area = mpVal ? Number(mpVal) * 1000000 : curW * curH;
+    const NW = snap16(Math.sqrt(area * ratio));
+    const NH = snap16(Math.sqrt(area / ratio));
+    if (NW === curW && NH === curH) return;
+    if (!isLayout) {
+      // caption 形态没有框可缩放：直接把目标尺寸写进 canvas_width/height（AI 拆解与 Compiler 都读它）
+      wCw.value = NW; wCh.value = NH;
+      syncWidgets(); renderAll();
+      return;
+    }
+    if (!confirm(`画布调整为 ${NW}×${NH}（≈${(NW * NH / 1000000).toFixed(2)}M）并等比缩放所有框？`)) return;
+    resizeLayoutTo(NW, NH);
   }
 
   // ---------- 手势 ----------
@@ -1480,11 +1541,181 @@ function initTranslator(node) {
   };
 }
 
+// 编译器节点：canvas_width/canvas_height 一旦连线，就把来源 Editor 的当前画布尺寸
+// 实时写进 Compiler 的 width/height widget——后端执行时本来就以连线为准，
+// 这里同步只是让界面显示与实际生效值一致，避免"连了 928×1648 却还显示 1024"。
+function initCompilerSizeSync(node) {
+  if (node._mpsSizeSync) return;
+  node._mpsSizeSync = true;
+
+  const getWidget = (n, name) => ((n && n.widgets) || []).find((w) => w.name === name);
+  if (!getWidget(node, "width") || !getWidget(node, "height")) return;
+
+  const graphOf = () => node.graph || (typeof app !== "undefined" && app.graph) || null;
+  const inputIndex = (name) => ((node.inputs) || []).findIndex((i) => i.name === name);
+  const linkById = (lid) => {
+    const g = graphOf();
+    if (!g || !g.links) return null;
+    const keys = [lid, String(lid)];
+    if (typeof g.links.get === "function") {
+      for (const k of keys) { const l = g.links.get(k); if (l) return l; }
+      return null;
+    }
+    if (Array.isArray(g.links)) {
+      return g.links.find((l) => l && (l.id === lid || String(l.id) === String(lid))) || null;
+    }
+    for (const k of keys) { if (g.links[k]) return g.links[k]; }
+    return null;
+  };
+  const nodeClass = (n) => (n.constructor && n.constructor.comfyClass) || n.comfyClass || n.type;
+  const nodeFromLink = (link) => {
+    if (!link) return null;
+    const g = graphOf();
+    const raw = link.origin_id;
+    return (g && (
+      (g.getNodeById && (g.getNodeById(raw) || g.getNodeById(String(raw)))) ||
+      (g._nodes_by_id && (g._nodes_by_id[raw] || g._nodes_by_id[String(raw)]))
+    )) || null;
+  };
+  const readInputLink = (n, name) => {
+    const idx = ((n && n.inputs) || []).findIndex((i) => i.name === name);
+    if (idx < 0) return null;
+    // 新版前端推荐 getInputLink（返回 Link 对象）；旧版回退到 input.link。
+    if (typeof n.getInputLink === "function") {
+      const l = n.getInputLink(idx);
+      if (!l) return null;
+      return typeof l === "object" ? l : linkById(l);
+    }
+    const lid = n.inputs[idx].link;
+    return lid == null ? null : linkById(lid);
+  };
+  const linkOf = (name) => readInputLink(node, name);
+  const snapEditorDim = (v) => Math.max(64, Math.min(15360, Math.round(v / 16) * 16));
+  const sourceWidgetValue = (name) => {
+    const src = nodeFromLink(linkOf(name));
+    if (!src) return null;
+    const cls = nodeClass(src);
+    if (cls === "MOSSEditor") {
+      // 优先读 edits 里的 layout 尺寸：比例/像素调整后它一定被重写，与画布结果同源；
+      // caption 形态的 edits 没有 width/height，再回落到 canvas_width/height widget。
+      const key = name === "canvas_width" ? "width" : "height";
+      const edits = getWidget(src, "edits");
+      if (edits && edits.value) {
+        try {
+          const d = JSON.parse(edits.value);
+          const v = Number(d && d[key]);
+          if (Number.isFinite(v)) return snapEditorDim(v);
+        } catch (e) { /* 非法 JSON：回落 widget */ }
+      }
+      const w = getWidget(src, name);
+      const v = w ? Number(w.value) : NaN;
+      return Number.isFinite(v) ? snapEditorDim(v) : null;
+    }
+    const names = name === "canvas_width" ? ["canvas_width", "width"] : ["canvas_height", "height"];
+    for (const n of names) {
+      const w = getWidget(src, n);
+      const v = w ? Number(w.value) : NaN;
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  };
+
+  // 沿 draft 上游找 Editor：直接接 Editor，或经过 Translator（可多层）都认。
+  const upstreamEditor = () => {
+    let src = nodeFromLink(readInputLink(node, "draft"));
+    for (let depth = 0; depth < 4 && src; depth++) {
+      const cls = nodeClass(src);
+      if (cls === "MOSSEditor") return src;
+      if (cls !== "MOSSTranslator") return null;
+      src = nodeFromLink(readInputLink(src, "draft"));
+    }
+    return null;
+  };
+
+  // 旧工作流保存的 Compiler 没有 canvas_width/height 连线（甚至没有这两个输入槽），
+  // F5 后手动连线会丢。这里从 draft 上游自动补连线；已接好则不动，每轮最多尝试一次。
+  const autoWire = () => {
+    if (node._mpsAutoWired) return;
+    if (linkOf("canvas_width") && linkOf("canvas_height")) {
+      node._mpsAutoWired = true;
+      return;
+    }
+    const ed = upstreamEditor();
+    if (!ed) return;
+    const widthIdx = inputIndex("canvas_width");
+    const heightIdx = inputIndex("canvas_height");
+    const edWidth = ((ed.outputs) || []).findIndex((o) => o.name === "width");
+    const edHeight = ((ed.outputs) || []).findIndex((o) => o.name === "height");
+    let wired = false;
+    try {
+      if (!linkOf("canvas_width") && widthIdx >= 0 && edWidth >= 0) {
+        wired = !!ed.connect(edWidth, node, widthIdx) || wired;
+      }
+      if (!linkOf("canvas_height") && heightIdx >= 0 && edHeight >= 0) {
+        wired = !!ed.connect(edHeight, node, heightIdx) || wired;
+      }
+    } catch (e) { /* 下一轮再试 */ }
+    if (linkOf("canvas_width") && linkOf("canvas_height")) {
+      node._mpsAutoWired = true;
+      if (wired) console.log("[MOSS Studio] Compiler 已自动连接 Editor 尺寸输出", node.id);
+    }
+  };
+
+  let applying = false;
+  const syncOnce = () => {
+    if (applying) return;
+    applying = true;
+    let changed = false;
+    try {
+      autoWire();
+      // 每次轮询都重新取 widget：新版前端在工作流加载/配置过程中可能替换 widget 对象。
+      const pairs = [["width", "canvas_width"], ["height", "canvas_height"]];
+      for (const [targetName, sourceName] of pairs) {
+        const widget = getWidget(node, targetName);
+        if (!widget) continue;
+        const v = sourceWidgetValue(sourceName);
+        if (v == null) {
+          if (!node._mpsSyncWarned && linkOf(sourceName)) {
+            node._mpsSyncWarned = true;
+            console.warn("[MOSS Studio] Compiler 尺寸联动：已连线但读不到来源尺寸", node.id, sourceName);
+          }
+          continue;
+        }
+        if (Number(widget.value) !== v) { widget.value = v; changed = true; }
+      }
+      // 只更新界面显示；执行时后端本来就以连线值为准，不把工作流标记成"已修改"。
+      if (changed) {
+        if (!node._mpsSyncLogged) {
+          node._mpsSyncLogged = true;
+          console.log("[MOSS Studio] Compiler 尺寸联动已生效", node.id);
+        }
+        try { node.setDirtyCanvas(true, true); } catch (e) { /* noop */ }
+      }
+    } finally { applying = false; }
+  };
+
+  const timer = setInterval(syncOnce, 500);
+  const prevConfigure = node.onConfigure;
+  node.onConfigure = function (...a) {
+    const r = prevConfigure ? prevConfigure.apply(this, a) : undefined;
+    setTimeout(syncOnce, 0);
+    return r;
+  };
+  const prevRemoved = node.onRemoved;
+  node.onRemoved = function (...a) {
+    clearInterval(timer);
+    if (prevRemoved) return prevRemoved.apply(this, a);
+  };
+  setTimeout(syncOnce, 0);
+  console.log("[MOSS Studio] Compiler 尺寸联动监听已启动", node.id);
+}
+
 app.registerExtension({
   name: "MOSSPromptStudio.EditorCanvas",
   async nodeCreated(node) {
     const cls = (node.constructor && node.constructor.comfyClass) || node.comfyClass;
     if (cls === "MOSSEditor") init(node);
     else if (cls === "MOSSTranslator") initTranslator(node);
+    else if (cls === "MOSSCompiler") initCompilerSizeSync(node);
   },
 });

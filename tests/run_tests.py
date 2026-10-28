@@ -152,18 +152,20 @@ def test_sniff_forms_and_roundtrip():
 
 def test_editor_node():
     src = json.dumps(CUP, ensure_ascii=False)
-    (out,) = MOSSEditor().run(src, 1024, 1024, "")
-    assert json.loads(out) == CUP
+    out, w, h = MOSSEditor().run(src, 1024, 1024, "")
+    assert json.loads(out) == CUP and (w, h) == (1536, 1024), "layout 宽高输出跟草稿走"
     # edits 优先
     edited = json.loads(src); edited["summary"]["caption"] += " 补一句。"
-    (out2,) = MOSSEditor().run(src, 1024, 1024, json.dumps(edited, ensure_ascii=False))
+    out2, _, _ = MOSSEditor().run(src, 1024, 1024, json.dumps(edited, ensure_ascii=False))
     assert json.loads(out2)["summary"]["caption"].endswith("补一句。")
     # 已编译输入走反解
-    (out3,) = MOSSEditor().run(json.dumps(COMPILED_POSTER, ensure_ascii=False), 1024, 1024, "")
-    assert json.loads(out3)["width"] == 1024
-    # 纯文本输入 → caption 形态
-    (out4,) = MOSSEditor().run("一段纯文本中文提示词。", 1024, 1024, "")
-    assert json.loads(out4) == {"caption": "一段纯文本中文提示词。"}
+    out3, w3, h3 = MOSSEditor().run(json.dumps(COMPILED_POSTER, ensure_ascii=False), 1024, 1024, "")
+    assert json.loads(out3)["width"] == 1024 and (w3, h3) == (1024, 1024)
+    # 纯文本输入 → caption 形态，宽高输出取 canvas widget（并对齐 16）
+    out4, w4, h4 = MOSSEditor().run("一段纯文本中文提示词。", 832, 1216, "")
+    assert json.loads(out4) == {"caption": "一段纯文本中文提示词。"} and (w4, h4) == (832, 1216)
+    _, w5, h5 = MOSSEditor().run("一段纯文本中文提示词。", 830, 1210, "")
+    assert (w5, h5) == (832, 1216), "caption 宽高输出应为 16 的倍数"
     _expect(SniffError, MOSSEditor().run, '{"foo":1}', 1024, 1024, "")
 
 
@@ -184,6 +186,16 @@ def test_compiler_node():
     # 已编译形态：校验后原样紧凑重排
     p, _, w, h, _ = node.run(json.dumps(COMPILED_POSTER), "neg", 640, 640)
     assert json.loads(p) == COMPILED_POSTER and (w, h) == (640, 640)
+    # 连线 Editor 宽高：caption/已编译形态优先于 widget
+    _, _, w, h, _ = node.run('{"caption":"你好"}', "neg", 1024, 1024, False, 1536, 1024)
+    assert (w, h) == (1536, 1024)
+    _, _, w, h, _ = node.run(json.dumps(COMPILED_POSTER), "neg", 640, 640, False, 832, 1216)
+    assert (w, h) == (832, 1216)
+    # layout 形态无视连线值，始终跟草稿尺寸
+    _, _, w, h, _ = node.run(json.dumps(CUP, ensure_ascii=False), "neg", 512, 512, False, 512, 512)
+    assert (w, h) == (1536, 1024)
+    # 连线值必须是 16 的倍数
+    _expect(SniffError, node.run, '{"caption":"你好"}', "neg", 1024, 1024, False, 1000, 1024)
 
 
 # ---------- 翻译：结构校验 / endpoint / 请求体 ----------
@@ -256,18 +268,32 @@ def test_resolve_endpoint_and_body():
     assert url == "http://10.0.0.2:8000/v1" and model == "MiMo"
     _expect(TranslationError, resolve_endpoint, "custom", "", "", "off", {})
 
+    # MiMo：thinking.type 二值开关；官方 v2.6 默认开启，off 必须显式 disabled
     b = build_body("m", 0.3, "high", "mimo", "")
-    assert b["reasoning_effort"] == "high"
+    assert b["thinking"] == {"type": "enabled"} and "reasoning_effort" not in b
     assert b["max_tokens"] == 16384, "必须显式给足输出预算，防思考吃掉后正文截断"
+    assert b["max_completion_tokens"] == 16384, "MiMo 用它限制思考+正文的总长度"
+    b = build_body("m", 0.3, "off", "mimo", "")
+    assert b["thinking"] == {"type": "disabled"}
+    # DeepSeek：off 必须显式 none（不传时默认仍会思考）
     b = build_body("deepseek-flash", 0.3, "off", "deepseek", "")
-    assert "reasoning_effort" not in b
+    assert b["reasoning_effort"] == "none"
     b = build_body("deepseek-flash", 0.3, "medium", "deepseek", "")
     assert b["reasoning_effort"] == "high", "medium 应映射到 DeepSeek 的 high 档"
     b = build_body("deepseek-flash", 0.3, "high", "deepseek", "")
     assert b["reasoning_effort"] == "max"
+    # custom：off 不额外发参数；非 off 发 reasoning_effort
+    b = build_body("m", 0.3, "off", "custom", "")
+    assert "reasoning_effort" not in b and "thinking" not in b
+    b = build_body("m", 0.3, "high", "custom", "")
+    assert b["reasoning_effort"] == "high"
     b = build_body("m", 0.3, "off", "custom",
                    '{"temperature": 0.9, "chat_template_kwargs": {"thinking": true}}')
     assert b["temperature"] == 0.9 and b["chat_template_kwargs"]["thinking"] is True
+    # extra_body 最后合并，可覆盖 MiMo 的 thinking / max_completion_tokens
+    b = build_body("m", 0.3, "off", "mimo",
+                   '{"thinking": {"type": "enabled"}, "max_completion_tokens": 4096}')
+    assert b["thinking"] == {"type": "enabled"} and b["max_completion_tokens"] == 4096
     _expect(TranslationError, build_body, "m", 0.3, "off", "custom", "not json")
 
 
@@ -527,20 +553,82 @@ def test_ai_draft_success_and_writeback():
         MockHandler.queue = ["```json\n" + json.dumps(LAYOUT_ZH, ensure_ascii=False) + "\n```"]
         ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
         assert isinstance(ret, dict) and "ui" in ret and "result" in ret
-        assert json.loads(ret["result"][0]) == LAYOUT_ZH
+        assert json.loads(ret["result"][0]) == LAYOUT_ZH and ret["result"][1:] == (1024, 1024)
         assert json.loads(ret["ui"]["mps_draft"]) == LAYOUT_ZH, "拆解结果必须随 ui 写回前端"
         assert MockHandler.hits == 1
     finally:
         srv.shutdown()
 
 
-def test_ai_draft_retry_on_invalid_bbox():
+def test_ai_draft_repairs_bad_bbox_and_extra_fields():
+    """AI 拆解专用修复：越界框夹取、删除 schema 外字段，不再为一处小错整轮重试。"""
     import copy
 
     srv = _start_mock()
     try:
         bad = copy.deepcopy(LAYOUT_ZH)
-        bad["items"][0]["bbox"] = [0, 0, 9999, 500]  # 越界 → 校验拒绝
+        bad["items"][0]["bbox"] = [0, 0, 9999, 500]  # 越界 → 本地夹取
+        bad["items"][0]["description"] = "extra"     # 元素级多余字段 → 删除
+        bad["text"] = "oops"                         # 顶层多余字段 → 删除
+        MockHandler.queue = [json.dumps(bad, ensure_ascii=False)]
+        ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        out = json.loads(ret["result"][0])
+        assert MockHandler.hits == 1, "可本地修复的偏差不应触发重试"
+        assert out["items"][0]["bbox"] == [0, 0, 1024, 500]
+        assert "text" not in out and "description" not in out["items"][0]
+    finally:
+        srv.shutdown()
+
+
+def test_ai_draft_repairs_missing_summary():
+    """模型把 caption/meta/canvas 放到顶层、summary 整个缺失 → 本地重建 summary。"""
+    import copy
+
+    srv = _start_mock()
+    try:
+        bad = copy.deepcopy(LAYOUT_ZH)
+        s = bad.pop("summary")
+        bad["caption"] = s["caption"]
+        for k in ("meta", "canvas", "palette"):
+            if k in s:
+                bad[k] = s[k]
+        MockHandler.queue = [json.dumps(bad, ensure_ascii=False)]
+        ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        out = json.loads(ret["result"][0])
+        assert MockHandler.hits == 1, "summary 缺失应本地重建，不重试"
+        assert out["summary"]["caption"] == s["caption"]
+        for k in ("meta", "canvas", "palette"):
+            if k in s:
+                assert out["summary"][k] == s[k]
+    finally:
+        srv.shutdown()
+
+
+def test_ai_draft_falls_back_to_prose_for_empty_caption():
+    """summary 在、但 caption 为空 → 用原始散文兜底，不重试。"""
+    import copy
+
+    srv = _start_mock()
+    try:
+        bad = copy.deepcopy(LAYOUT_ZH)
+        bad["summary"]["caption"] = ""
+        MockHandler.queue = [json.dumps(bad, ensure_ascii=False)]
+        ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        out = json.loads(ret["result"][0])
+        assert MockHandler.hits == 1
+        assert out["summary"]["caption"] == "一段特摄战斗的纯文本提示词。"
+    finally:
+        srv.shutdown()
+
+
+def test_ai_draft_retry_on_unrepairable():
+    """真正修不好的错误（items 为空）仍要走重试。"""
+    import copy
+
+    srv = _start_mock()
+    try:
+        bad = copy.deepcopy(LAYOUT_ZH)
+        bad["items"] = []  # 空 items 无法本地修复 → 校验拒绝
         MockHandler.queue = [json.dumps(bad, ensure_ascii=False), json.dumps(LAYOUT_ZH, ensure_ascii=False)]
         ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
         assert json.loads(ret["result"][0]) == LAYOUT_ZH and MockHandler.hits == 2
@@ -550,13 +638,13 @@ def test_ai_draft_retry_on_invalid_bbox():
 
 def test_ai_draft_disabled_and_layout_passthrough():
     # ai_draft 关闭：纯文本仍按 caption 走
-    (out,) = MOSSEditor().run("纯文本。", 1024, 1024, "", ai_draft=False)
+    out, _, _ = MOSSEditor().run("纯文本。", 1024, 1024, "", ai_draft=False)
     assert json.loads(out) == {"caption": "纯文本。"}
     # 输入已是 layout：ai_draft 不触发 LLM、不产生 ui
     ret = MOSSEditor().run(json.dumps(CUP, ensure_ascii=False), 1024, 1024, "", ai_draft=True,
                            provider="custom", base_url="http://127.0.0.1:1/v1", model="x",
                            api_key="EMPTY", temperature=0.3, thinking="off", timeout=5, ai_prompt="")
-    assert isinstance(ret, tuple) and json.loads(ret[0])["width"] == 1536
+    assert isinstance(ret, tuple) and json.loads(ret[0])["width"] == 1536 and ret[1:] == (1536, 1024)
 
 
 TESTS = [
@@ -577,7 +665,10 @@ TESTS = [
     test_http_fail_after_retries,
     test_http_truncation_detected,
     test_ai_draft_success_and_writeback,
-    test_ai_draft_retry_on_invalid_bbox,
+    test_ai_draft_repairs_bad_bbox_and_extra_fields,
+    test_ai_draft_repairs_missing_summary,
+    test_ai_draft_falls_back_to_prose_for_empty_caption,
+    test_ai_draft_retry_on_unrepairable,
     test_ai_draft_disabled_and_layout_passthrough,
 ]
 

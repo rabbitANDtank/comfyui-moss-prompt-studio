@@ -15,6 +15,8 @@ MOSSEditor ──draft_zh──> MOSSTranslator ──draft_en──> MOSSCompil
                                           生成图可回接 Editor 当底图对比迭代
 ```
 
+> caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（示例工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
+
 ## 安装
 
 把本目录放进 `ComfyUI/custom_nodes/`（zip 解压或 git 均可），重启 ComfyUI。后端零第三方依赖（纯标准库）；底图功能依赖 Pillow（ComfyUI 自带）。
@@ -29,7 +31,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 ├── AGENT.example.md       # 根目录默认注入文件的模板
 ├── config.example.json    # LLM 连接配置模板（复制为 config.json 使用）
 ├── examples/              # 示例工作流 + 中文示例草稿
-├── tests/run_tests.py     # 离线测试（18 项）
+├── tests/run_tests.py     # 离线测试（22 项）
 └── LICENSE                # MIT
 ```
 
@@ -46,14 +48,14 @@ custom_nodes/comfyui-moss-prompt-studio/
   - **meta 体裁模块**：`summary.meta` 体裁标签（逗号分隔字符串数组），字段不存在时可直接添加；元素级对应 `tags` 标签同样常驻可编辑；
   - palette / meta / tags 都是独立 JSON 字段进入提示词（不拼进 caption）；翻译时 palette 里的 hex 颜色逐字保留，描述色名正常翻译；
   - **重叠检测**：框重叠时给出一键"谁在前"按钮，自动往 caption 里追加官方要求的遮挡措辞（`，处于最前层，部分遮挡相邻元素` / `，被前方元素部分遮挡`）；
-  - 比例 × 像素规模预设（1M/1.5M/2M/4M，对齐 MOSS 生态常用档；只选比例保持当前像素面积，只选像素规模保持当前比例），宽高自动取 16 倍数并等比缩放全部框；下拉框实时回显当前生效的比例/像素值；
+  - 比例 × 像素规模预设（像素档 0.25M/0.5M/1M/1.5M/2M/3M/4M，对应官方支持范围 0.25M–4M、推荐 1M/1.5M/2M；比例含 1:1、5:4、4:3、3:2、16:10、16:9、2:1、21:9、3:1 及对应竖版，官方允许任意比例，只要求宽高为 16 的倍数）；只选比例保持当前像素面积，只选像素规模保持当前比例，宽高自动取 16 倍数并等比缩放全部框；caption 形态没有框可缩放，直接改写 `canvas_width`/`canvas_height` 作为 AI 拆解目标；比例下拉里的“自定义宽高…”可直接输入任意 16 倍数尺寸；下拉框实时回显当前生效的比例/像素值；
   - 实时校验状态条（与编译器同一套规则）；
   - **底图**：`underlay` 输入口回接生成图，执行后自动垫在画布下做对比；
   - "⧉复制"一键复制编辑后的草稿 JSON；"⟲重置"回到粘贴源；
   - **LLM 配置预设**（💾 保存 / 🗑 删除 / 下拉切换）：把 provider/base_url/model/api_key/temperature/thinking/timeout 存成命名预设，编辑器与翻译器共享同一个预设库（存在 ComfyUI userdata，`moss_studio_llm_presets.json`）。
 - **AI 拆解**（`ai_draft` 勾选，或直接点工具栏 **⚡拆解**）：source 是散文/caption 时调用 LLM（与翻译节点同一套连接配置）生成官方 layout 草稿（中文条目、1–6 个元素、自动处理遮挡措辞），结果写回 edits 并刷新画布；`ai_prompt` widget 可整体改写拆解指令。拆解进行中画布保持现状、按钮显示进度，完成自动刷新；失败/超时有明确提示。⚡拆解 只提交编辑器单节点，不跑整个工作流。
 - **edits**（自动写回）：画布每次编辑自动写进这个 widget，**非空时优先进 source**；编辑状态随工作流保存/重载/API 无头运行不丢。caption 形态退化为文本编辑。
-- 输出：`draft`（编辑后草稿 JSON，STRING）。
+- 输出：`draft`（编辑后草稿 JSON，STRING）、`width`/`height`（当前画布尺寸，INT；layout 取草稿尺寸，caption 取 `canvas_width`/`canvas_height` 并对齐 16 倍数）。把这两个输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入口，caption 形态的生图尺寸也会与画布一致，且 Compiler 的 width/height 显示会自动跟随。
 
 ### 2. MOSS 提示词翻译器（MOSSTranslator）
 
@@ -65,7 +67,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 | base_url | OpenAI 兼容地址；留空读 `config.json`；deepseek 预设 `https://api.deepseek.com/v1`（线上 API） |
 | model | 留空读 config / 预设 |
 | api_key | `EMPTY`/留空读 config；内网免鉴权可保持 EMPTY |
-| thinking | `off/low/medium/high`，默认 off，统一发 `reasoning_effort` 参数（deepseek 档位映射：low→low、medium→high、high→max）。部署不认该参数就用 extra_body 覆盖 |
+| thinking | `off/low/medium/high`，默认 off。**off 会显式关闭思考**：deepseek 发 `reasoning_effort:"none"`，mimo 发 `thinking:{"type":"disabled"}`。deepseek 档位 low→low、medium→high、high→max；mimo 是二值开关，low/medium/high 都等于开启（v2.6 flash 默认开启，不显式关闭会慢数倍）；custom 非 off 发 `reasoning_effort`，不认就用 extra_body 覆盖 |
 | LLM 配置栏 | 节点顶部与编辑器共享的预设栏（下拉套用 / 💾 保存 / 🗑 删除），多套连接配置一键切换 |
 | extra_body | 原始 JSON 合并进请求体（**最后合并、可覆盖一切**），如 `{"chat_template_kwargs":{"thinking":true}}` |
 | system_prompt | 默认内建"翻译契约"，可整体改写；清空即恢复默认 |
@@ -120,7 +122,21 @@ This batch: keep all product names in original Chinese pinyin.
 
 移植官方 `compile_prompt.py`：严格校验（未知字段/越界框/非 16 倍数/重复键/NaN 全部拒绝）+ 坐标编译（abs/xyxy → abs_centralized/yxyx，边缘 floor/ceil，去 width/height，单行紧凑输出）。
 
-输出：`prompt`（接 MOSS-Image 文本编码节点正向提示词）、`negative`（默认官方推荐值，可改）、`width`/`height`（layout 取草稿值；caption 形态用 widget 兜底，默认 1024）、`clip_text`（给 CLIP 文本编码器的单口文本，默认=prompt，勾选 `clip_include_negative` 时在其后拼接负向提示词）。
+**宽高来源**（三种输入形态互不混淆）：
+
+| 输入形态 | 尺寸来源 |
+|---|---|
+| layout 草稿（带 `width`/`height` 和 `items[].bbox`） | 始终用草稿里的 `width`/`height`；连线/widget 都不覆盖 |
+| caption（`{"caption": ...}`） | `canvas_width`/`canvas_height` 连线优先；未连线才用本节点 `width`/`height` widget（默认 1024） |
+| 已编译（`abs_centralized` + `yxyx`） | 同上：连线优先，未连线用 widget |
+
+`canvas_width`/`canvas_height` 接 Editor 的 `width`/`height` 输出（必须为 16 的正整数倍）。把 Compiler 的 `width`/`height` 输出接到 MOSS-Image 采样节点，即可保证生成尺寸与画布一致；layout 形态即使接了连线也不会覆盖草稿尺寸。
+
+**界面联动**：一旦 `canvas_width`/`canvas_height` 连线，Compiler 的 `width`/`height` widget 会由前端实时跟随 Editor 的当前画布尺寸（约 0.5 秒内），不需要手动改；调整 Editor 的比例、像素档或自定义宽高后，Compiler 里的数字会同步变化。这只影响界面显示，执行时仍按上面的优先级取连线值。
+
+**自动补线**：旧工作流保存的 Compiler 可能没有 `canvas_width`/`canvas_height` 这两个输入或连线，刷新后会丢。现在 Compiler 加载时会沿 `draft` 上游追溯（`Editor → Translator → Compiler`，或 Editor 直连 Compiler），自动把该 Editor 的 `width`/`height` 输出接到自己的 `canvas_width`/`canvas_height`；已经手动接好的不覆盖。刷新后 Compiler 会自动恢复联动，保存工作流后连线也会一并保存。
+
+输出：`prompt`（接 MOSS-Image 文本编码节点正向提示词）、`negative`（默认官方推荐值，可改）、`width`/`height`（layout 取草稿值；caption/已编译优先取 `canvas_width`/`canvas_height` 连线，未连线才用节点 widget）、`clip_text`（给 CLIP 文本编码器的单口文本，默认=prompt，勾选 `clip_include_negative` 时在其后拼接负向提示词）。
 
 ## 上游契约（给内网 agent 的要求）
 
@@ -145,6 +161,7 @@ This batch: keep all product names in original Chinese pinyin.
 - 套餐地址与模型名以套餐文档为准（形如 `https://xxx/v1`、模型名如 `mimo-v2.6-flash`）
 - api_key 用套餐发放的 `tp-` 开头密钥
 - 内网自部署 MiMo 则把 base_url 换成内网地址即可（免鉴权时 api_key 保持 `EMPTY`）
+- **`mimo-v2.6-flash` 默认开启深度思考**：插件的 `thinking=off` 会显式发 `thinking:{"type":"disabled"}` 关闭；开启思考时 temperature/top_p 会被服务端忽略。插件同时发 `max_completion_tokens` 限制“思考+正文”总长度
 
 ### DeepSeek API
 
@@ -160,7 +177,7 @@ This batch: keep all product names in original Chinese pinyin.
 
 - base_url 留空时 deepseek provider 自动使用官方地址 `https://api.deepseek.com/v1`
 - 模型名留空时默认 `deepseek-chat`（官方别名）；也可显式指定 `deepseek-flash` / `deepseek-v4-pro`
-- 思考强度经 `reasoning_effort` 参数控制（low/medium/high → low/high/max），无需更换模型名
+- 思考强度经 `reasoning_effort` 参数控制（off → `none` 显式关闭；low/medium/high → low/high/max），无需更换模型名
 
 ### 通用说明
 
@@ -174,9 +191,25 @@ python tests/run_tests.py
 
 覆盖官方口径编译（含官方文档给出的期望坐标）、三形态识别与反解往返、节点行为、翻译结构校验、endpoint/请求体组装、mock HTTP 下的成功/重试/失败路径。
 
+## 排查 LLM 耗时
+
+每次模型调用都会在 ComfyUI 控制台输出一行 `[MOSS Studio] LLM ...`：
+
+```
+[MOSS Studio] LLM draft attempt=1/3 2.14s host=api.deepseek.com model=deepseek-flash thinking=None effort=none finish=stop completion=243 reasoning=-
+```
+
+- `attempt=1/3`：第几次调用；同一批出现多行表示发生了重试。
+- `thinking` / `effort`：实际发出的思考开关。MiMo 应为 `{'type': 'disabled'}`，DeepSeek 应为 `effort=none`；如果这里是 `None`，说明节点没走到对应的 provider/thinking 配置。
+- `completion`：总输出 token；`reasoning`：其中思考 token（`-` 表示响应没有该字段）。`thinking=off` 时 `reasoning` 应为 0 或 `-`；如果是几千，说明服务端没有遵守关闭参数。
+- `[MOSS Studio] AI 拆解已本地修复: ...`：越界框/多余字段被自动修正，没有触发重试。
+- `[MOSS Studio] AI 拆解 attempt=N 失败: ...`：该次输出仍不合规，会带错误重试。
+- `finish=length` 表示输出被 token 上限截断。
+
 ## 设计依据与致谢
 
 - 编译器与校验规则移植自 [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 官方 skill（`skills/moss-image-prompt-enhancer`），保证与官方口径一致。
+- 分辨率口径取自官方 `USERGUIDE.md`：支持 0.25M（512×512）到 4M（2K）像素总量，推荐 1M/1.5M/2M；比例任意，宽高必须是 16 的正整数倍。
 - 画布交互改编自 [swan7-py/json-prompt-visualizer](https://github.com/swan7-py/json-prompt-visualizer) 的 canvas.py（拖拽/缩放/撤销/重叠闸门/坐标换算思路），适配为 ComfyUI 前端扩展。
 - 指令文件的追加注入语义参考了 [Codex-X](https://github.com/yynxxxxx/Codex-X) 的 Append 托管块设计。
 

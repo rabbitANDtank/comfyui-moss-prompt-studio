@@ -39,8 +39,13 @@ def _snap16(v, lo=64, hi=15360):
 class MOSSEditor:
     CATEGORY = "MOSS Prompt Studio"
     FUNCTION = "run"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("draft",)
+    RETURN_TYPES = ("STRING", "INT", "INT")
+    RETURN_NAMES = ("draft", "width", "height")
+    OUTPUT_TOOLTIPS = (
+        "编辑后的草稿 JSON",
+        "当前画布宽：layout 取草稿 width；caption 取 canvas_width（16 倍数）",
+        "当前画布高：layout 取草稿 height；caption 取 canvas_height（16 倍数）",
+    )
     # 允许作为输出根节点：画布工具栏的"⚡拆解"按钮只提交本节点也能执行
     OUTPUT_NODE = True
 
@@ -65,10 +70,11 @@ class MOSSEditor:
                 }),
                 "canvas_width": ("INT", {
                     "default": 1024, "min": 64, "max": 15360, "step": 16,
-                    "tooltip": "画布尺寸：AI 拆解的目标构图尺寸；粘贴已编译 JSON 时兼作反解尺寸",
+                    "tooltip": "画布尺寸：AI 拆解的目标构图尺寸；粘贴已编译 JSON 时兼作反解尺寸；caption 形态下同时作为本节点 width 输出（接 Compiler 的 canvas_width）",
                 }),
                 "canvas_height": ("INT", {
-                    "default": 1024, "min": 64, "max": 15360, "step": 16, "tooltip": "同上",
+                    "default": 1024, "min": 64, "max": 15360, "step": 16,
+                    "tooltip": "画布尺寸：AI 拆解的目标构图尺寸；粘贴已编译 JSON 时兼作反解尺寸；caption 形态下同时作为本节点 height 输出（接 Compiler 的 canvas_height）",
                 }),
                 "edits": ("STRING", {
                     "default": "", "multiline": True,
@@ -85,7 +91,7 @@ class MOSSEditor:
                 "temperature": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "thinking": (["off", "low", "medium", "high"], {
                     "default": "off",
-                    "tooltip": "拆解比翻译更需要推理，效果不好可开 low/medium",
+                    "tooltip": "拆解比翻译更需要推理，效果不好可开 low/medium；MiMo 只有开/关（low/medium/high 同效），DeepSeek off 会显式关闭思考",
                 }),
                 "timeout": ("INT", {"default": 180, "min": 10, "max": 1200}),
                 "ai_prompt": ("STRING", {
@@ -129,14 +135,20 @@ class MOSSEditor:
             ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
 
         out = json.dumps(info["draft"], ensure_ascii=False, indent=2)
+        # 与草稿同源的宽高：layout 用草稿尺寸；caption 用本节点 canvas_width/height，
+        # 接给 Compiler 的 canvas_width/height 输入即可保证生图尺寸与画布一致。
+        if info["kind"] == "layout":
+            out_w, out_h = int(info["draft"]["width"]), int(info["draft"]["height"])
+        else:
+            out_w, out_h = _snap16(canvas_width), _snap16(canvas_height)
 
         if underlay is not None:
             img = _save_underlay(underlay)
             if img is not None:
                 ui.setdefault("images", []).append(img)
         if ui:
-            return {"ui": ui, "result": (out,)}
-        return (out,)
+            return {"ui": ui, "result": (out, out_w, out_h)}
+        return (out, out_w, out_h)
 
 
 def _save_underlay(images):
