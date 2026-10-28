@@ -231,12 +231,14 @@ python tests/run_tests.py
 - 画布交互改编自 [swan7-py/json-prompt-visualizer](https://github.com/swan7-py/json-prompt-visualizer) 的 canvas.py（拖拽/缩放/撤销/重叠闸门/坐标换算思路），适配为 ComfyUI 前端扩展。
 - 指令文件的追加注入语义参考了 [Codex-X](https://github.com/yynxxxxx/Codex-X) 的 Append 托管块设计。
 
+## 使用须知与免责声明
+
+本项目只提供提示词编辑、翻译和格式转换，本身不生成、不托管、不审核图像内容。请仅用于合法目的，并自行确保输入、生成内容和发布行为符合适用法律法规、目标平台条款及第三方模型/API 政策；API key 由你自行保管。
+
+严禁用于制作或传播违法内容（包括 CSAM、非自愿色情、暴力、仇恨、骚扰、恐怖主义、诈骗、虚假信息，以及侵犯他人合法权益的内容），严禁绕过平台安全机制或冒充他人。AI 输出可能不准确或不合适，请自行审核并对使用结果负责；在适用法律允许的范围内，作者与贡献者不对任何直接或间接损失、法律责任或第三方索赔负责。本项目按 MIT 许可“按原样”提供，不附带任何担保；本声明不构成法律建议。
+
+> For lawful prompt engineering only. Users are solely responsible for their inputs, outputs, and compliance with applicable laws and third-party terms. No warranty; no liability for misuse.
+
 ## 许可
 
 MIT（见 [LICENSE](LICENSE)）。
-
-## 已知限制
-
-- 画布前端在 ComfyUI API 无头模式下不渲染（edits widget 值照常生效）。
-- DeepSeek 思考强度细档位（low/medium/high 的差异）取决于其 API 当时的参数支持，必要时用 extra_body 指定。
-- 粘贴已编译 JSON 时若 canvas_width/height 与原图不符，反解出的框位置会偏移——按原图尺寸设置后再粘。
