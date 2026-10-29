@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   detectKind, reverseCompiled, parseSourceText, validateDraft,
-  snapshotOf, serializeDraft, clampBox, resizeDraft,
+  snapshotOf, serializeDraft, clampBox, resizeDraft, sourceSignature, clampArea,
 } from "../web/js/editor/model.js";
 
 const DRAFT = {
@@ -93,4 +93,21 @@ test("clampBox keeps boxes inside the canvas and non-zero", () => {
   assert.deepEqual(clampBox([1020, 100, 1020, 200], 1024, 1024), [1020, 100, 1024, 200]);
   assert.deepEqual(clampBox([0, 0, 0, 0], 1024, 1024), [0, 0, 8, 8]);
   assert.deepEqual(clampBox([-10, -10, 2000, 2000], 1024, 1024), [0, 0, 1024, 1024]);
+});
+
+test("sourceSignature matches py.translate.source_signature (FNV-1a UTF-8)", () => {
+  // 值由 Python 侧同算法生成；两边必须一致，否则 edits 归属判断永远失效
+  assert.equal(sourceSignature("abc"), "fnv1a:1a47e90b");
+  assert.equal(sourceSignature("中文 source"), "fnv1a:00c2069a");
+  assert.equal(sourceSignature(""), "fnv1a:811c9dc5");
+});
+
+test("clampArea keeps preset resizes inside MOSS 0.25M–4M", () => {
+  assert.deepEqual(clampArea(15360, 15360), [2000, 2000]);
+  const [w, h] = clampArea(64, 64);
+  assert.ok(w >= 512 && h >= 512, "过小画布应抬到 0.25M 以上");
+  assert.ok(w % 16 === 0 && h % 16 === 0);
+  assert.deepEqual(clampArea(1024, 1024), [1024, 1024], "合法面积不变");
+  const [w2, h2] = clampArea(4096, 2160);
+  assert.ok(w2 * h2 <= 4000000 && w2 % 16 === 0 && h2 % 16 === 0);
 });

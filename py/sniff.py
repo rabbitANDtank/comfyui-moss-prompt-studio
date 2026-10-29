@@ -61,10 +61,24 @@ def detect(obj) -> str:
 
 def _reverse_compiled(obj: dict, width: int, height: int) -> dict:
     """已编译（中心原点 yxyx）→ 草稿（左上原点 xyxy），按给定画布尺寸反解。"""
+    summary = obj.get("summary")
+    if not isinstance(summary, dict):
+        raise SniffError("已编译提示词缺少 summary 对象")
+    raw_items = obj.get("items")
+    if not isinstance(raw_items, list):
+        raise SniffError("已编译提示词的 items 必须是数组")
     items = []
-    for it in obj["items"]:
-        it = dict(it)
-        y0, x0, y1, x1 = it["bbox"]
+    for idx, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            raise SniffError(f"已编译提示词 items[{idx}] 必须是对象")
+        bbox = raw.get("bbox")
+        if (not isinstance(bbox, (list, tuple)) or len(bbox) != 4
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in bbox)):
+            raise SniffError(
+                f"已编译提示词 items[{idx}].bbox 必须是四个数字（yxyx 中心原点）"
+            )
+        it = dict(raw)
+        y0, x0, y1, x1 = bbox
         it["bbox"] = [
             int(round(x0 + width / 2)),
             int(round(y0 + height / 2)),
@@ -77,7 +91,7 @@ def _reverse_compiled(obj: dict, width: int, height: int) -> dict:
         "height": height,
         "bbox_coord_space": "abs",
         "bbox_format": "xyxy",
-        "summary": dict(obj["summary"]),
+        "summary": dict(summary),
         "items": items,
     }
 

@@ -13,9 +13,11 @@ import {
   VALID_LABELS, VALID_CANVAS, OCCL_FRONT, OCCL_BACK,
   detectKind, reverseCompiled, validateDraft as validateJS,
   parseSourceText, snapshotOf, serializeDraft,
-  clampDim, snap16, clampBox, csvParse, csvShow,
+  clampDim, clampArea, clampBox, csvParse, csvShow, sourceSignature,
 } from "./editor/model.js";
 import { editorFlushRegistry, mountEditorLifecycle, mountCompilerSync } from "./editor/comfy-hooks.js";
+import { parseReverseRecord, reverseDecision, reverseRecord } from "./editor/reverse.js";
+import { syncLlmConfig, warnApiKeyIfSet, bindApiKeyWarn } from "./editor/llm_config.js";
 
 console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
 
@@ -114,96 +116,7 @@ function injectStyle() {
   document.head.appendChild(st);
 }
 
-// ---------- 模型配置预设（编辑器画布工具栏与翻译器配置栏共享同一份库） ----------
-const PRESET_KEYS = ["provider", "base_url", "model", "api_key", "temperature", "thinking", "timeout"];
-const UD_PATH = "/userdata/moss_studio_llm_presets.json";
-let PRESETS = null;
-const presetSubs = new Set();
-
-const getApi = () => (typeof app !== "undefined" && app.api) || (typeof window !== "undefined" && window.app && window.app.api);
 editorFlushRegistry.install(app);
-
-function broadcastPresets() {
-  const list = PRESETS || [];
-  for (const fn of presetSubs) { try { fn(list); } catch (e) { /* noop */ } }
-}
-async function persistPresetsShared() {
-  const body = JSON.stringify(PRESETS || []);
-  try {
-    const api = getApi();
-    if (api && api.fetchApi) {
-      const r = await api.fetchApi(UD_PATH + "?overwrite=true", { method: "POST", body, headers: { "Content-Type": "application/json" } });
-      if (r.ok) return;
-    }
-  } catch (e) { /* 落到本地 */ }
-  try { localStorage.setItem("mps_llm_presets", body); } catch (e) { /* noop */ }
-}
-async function ensurePresets() {
-  if (PRESETS) return PRESETS;
-  let list = null;
-  try {
-    const api = getApi();
-    if (api && api.fetchApi) {
-      const r = await api.fetchApi(UD_PATH);
-      if (r.ok) list = await r.json();
-    }
-  } catch (e) { /* 落到本地 */ }
-  if (!Array.isArray(list)) {
-    try { list = JSON.parse(localStorage.getItem("mps_llm_presets") || "[]"); } catch (e) { list = []; }
-  }
-  PRESETS = (Array.isArray(list) ? list : []).filter(x => x && x.name);
-  broadcastPresets();
-  return PRESETS;
-}
-function fillPresetSelect(sel, chosen) {
-  if (!sel) return;
-  sel.innerHTML = "";
-  sel.appendChild(new Option("配置…", ""));
-  for (const p of PRESETS || []) sel.appendChild(new Option(p.name, p.name));
-  if (chosen) sel.value = chosen;
-}
-function applyPresetTo(node, name, notify) {
-  const p = (PRESETS || []).find(x => x.name === name);
-  if (!p) return;
-  for (const k of PRESET_KEYS) {
-    const w = (node.widgets || []).find(x => x.name === k);
-    if (!w || p[k] === undefined) continue;
-    w.value = p[k];
-    if (w.inputEl) {
-      w.inputEl.value = p[k];
-      w.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  }
-  if (notify) notify(`已套用配置「${name}」`);
-}
-async function savePresetFrom(node, sel, notify) {
-  const def = (sel && sel.value) || String(((node.widgets || []).find(x => x.name === "provider") || {}).value || "");
-  const name = prompt("配置名称（如：deepseek线上 / 内网mimo）：", def);
-  if (!name) return;
-  const p = { name };
-  for (const k of PRESET_KEYS) {
-    const w = (node.widgets || []).find(x => x.name === k);
-    if (w) p[k] = w.value;
-  }
-  await ensurePresets();
-  const i = PRESETS.findIndex(x => x.name === name);
-  if (i >= 0) PRESETS[i] = p; else PRESETS.push(p);
-  await persistPresetsShared();
-  broadcastPresets();
-  if (sel) sel.value = name;
-  if (notify) notify(`配置「${name}」已保存`);
-}
-function deletePresetFrom(sel, notify) {
-  const name = (sel && sel.value) || prompt("要删除的配置名称：");
-  if (!name) return;
-  const i = (PRESETS || []).findIndex(x => x.name === name);
-  if (i < 0) { alert(`没有找到配置「${name}」`); return; }
-  if (!confirm(`删除配置「${name}」？`)) return;
-  PRESETS.splice(i, 1);
-  persistPresetsShared();
-  broadcastPresets();
-  if (notify) notify(`配置「${name}」已删除`);
-}
 
 function init(node) {
   if (node._mpsInit) return;
@@ -212,19 +125,33 @@ function init(node) {
 
   const W = (name) => node.widgets.find((w) => w.name === name);
   let wSource = W("source"), wEdits = W("edits"), wCw = W("canvas_width"), wCh = W("canvas_height"), wAi = W("ai_draft");
+  let wReplace = W("replace_edits"), wSig = W("last_applied_sig"), wSrcSig = W("edits_source_sig");
   if (!wSource || !wEdits || !wCw || !wCh) { console.warn("[MOSS Studio] Editor 节点 widget 不完整，画布未启用"); return; }
   // 新版前端在 configure 时可能替换 widget 对象；每次生命周期/轮询都按名字重新绑定，
   // 避免闭包里拿着旧 widget 读写，导致“界面改了但 edits 没变”。
   const rebindWidgets = () => {
     const s = W("source"), e = W("edits"), cw = W("canvas_width"), ch = W("canvas_height"), ai = W("ai_draft");
+    const r = W("replace_edits"), sig = W("last_applied_sig"), ss = W("edits_source_sig");
     if (s) wSource = s;
     if (e) wEdits = e;
     if (cw) wCw = cw;
     if (ch) wCh = ch;
     if (ai) wAi = ai;
+    if (r) wReplace = r;
+    if (sig) wSig = sig;
+    if (ss) wSrcSig = ss;
+    normalizeReplaceEdits();
     bindEditsWidget();
     return !!(wSource && wEdits && wCw && wCh);
   };
+  // 旧工作流缓存的新增 widget 可能是 ""，不是布尔；按“未设置”处理为默认开
+  function normalizeReplaceEdits() {
+    if (!wReplace) return;
+    if (wReplace.value !== true && wReplace.value !== false) {
+      wReplace.value = true;
+      if (wReplace.inputEl && "checked" in wReplace.inputEl) wReplace.inputEl.checked = true;
+    }
+  }
   if (typeof node.addDOMWidget !== "function") { console.warn("[MOSS Studio] 当前前端不支持 addDOMWidget，画布未启用"); return; }
   sanitizeAgentMd(node);
 
@@ -309,20 +236,18 @@ function init(node) {
   const spacer = document.createElement("span");
   spacer.className = "mps-spacer";
   toolbar.appendChild(spacer);
-  // 模型配置预设：快速切换 mimo / deepseek 等多套连接配置（共享库，模块级实现）
-  const selPreset = document.createElement("select");
-  selPreset.appendChild(new Option("配置…", ""));
-  selPreset.title = "已保存的模型配置，选择即套用到本节点";
-  selPreset.addEventListener("change", () => { if (selPreset.value) applyPresetTo(node, selPreset.value, presetNotify); });
-  toolbar.appendChild(selPreset);
-  mkBtn("💾", () => savePresetFrom(node, selPreset, presetNotify), "把当前 provider/base_url/model/api_key/temperature/thinking/timeout 保存为预设");
-  mkBtn("🗑", () => deletePresetFrom(selPreset, presetNotify), "删除当前选中的预设");
+  // LLM 配置同步：把当前节点的连接配置复制到另外两个 MOSS LLM 节点（不含 api_key）
+  mkBtn("⇄同步", () => {
+    const n = syncLlmConfig(node, app.graph, app);
+    cfgNotify(`已同步 LLM 连接配置（不含 api_key）到另外 ${n} 个节点`);
+  }, "把当前 provider/base_url/model/temperature/thinking/timeout 复制到另外两个 MOSS 节点；api_key 不复制（会随工作流明文保存，建议放 config.json）");
   const btnCopy = mkBtn("⧉复制", async () => {
     try { await navigator.clipboard.writeText(wEdits.value || ""); btnCopy.textContent = "已复制"; setTimeout(() => (btnCopy.textContent = "⧉复制"), 1200); } catch (e) { /* noop */ }
   }, "复制编辑后的草稿 JSON");
   // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布
   const btnSplit = mkBtn("⚡拆解", () => runAiSplit(btnSplit), "把 source 散文拆解为布局草稿（只执行本节点，不跑整个工作流）");
-  mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); });
+  mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); },
+    "重置为 source 粘贴源：丢弃当前画布编辑并清空 edits（会二次确认；不能用 ↶撤销 恢复）");
 
   const main = document.createElement("div");
   main.className = "mps-main";
@@ -441,6 +366,19 @@ function init(node) {
     editsDirty: false, editsCb: null, writingEdits: false,
   });
 
+  // 明文 key 一次性警告（工作流/执行历史会保存 widget 的 api_key；同 key 只提示一次）
+  const showKeyWarn = (t) => {
+    try {
+      app.extensionManager?.toast?.add({ severity: "warn", summary: "MOSS Studio", detail: t, life: 6000 });
+    } catch (e) { /* toast 可选 */ }
+    try {
+      M.els.status.textContent = "⚠ " + t;
+      M.els.status.className = "mps-status";
+    } catch (e) { /* noop */ }
+  };
+  warnApiKeyIfSet(node, showKeyWarn);
+  bindApiKeyWarn(node, showKeyWarn);
+
   // 响应式降级：节点被拖窄（或加载了窄节点）时，先收窄侧栏、再改为上下堆叠，
   // 保证画布/文本区始终有可读宽度，不出现"文字逐字竖排"的挤压变形。
   const applyResponsive = () => {
@@ -499,10 +437,22 @@ function init(node) {
     if (M.S && M.S.kind === "layout") {
       wCw.value = M.S.d.width;
       wCh.value = M.S.d.height;
+      if (wCw.inputEl) wCw.inputEl.value = wCw.value;
+      if (wCh.inputEl) wCh.inputEl.value = wCh.value;
     }
     M.builtSig = currentSig();
     M.pendSig = M.builtSig;
   }
+
+  // edits 归属签名：写入画布内容时同时记录当时 source 的签名。后端/加载恢复据此
+  // 判断“这份 edits 是否仍对应当前 source”，换源后旧画布自动失效。
+  function setSourceSig(value) {
+    if (!wSrcSig) return;
+    const v = value || "";
+    wSrcSig.value = v;
+    if (wSrcSig.inputEl) wSrcSig.inputEl.value = v;
+  }
+  const currentSourceSig = () => sourceSignature((wSource.value || "").trim());
 
   function writeEdits(opts = {}) {
     // M.S 为空只代表“当前无法解析”，不能顺手清空已保存的 edits；
@@ -510,9 +460,16 @@ function init(node) {
     M.writingEdits = true;
     try {
       if (!M.S) {
-        if (opts.clear) wEdits.value = "";
+        if (opts.clear) {
+          wEdits.value = "";
+          if (wEdits.inputEl) wEdits.inputEl.value = "";
+          setSourceSig("");
+        }
       } else {
         wEdits.value = serializeDraft(M.S);
+        if (wEdits.inputEl) wEdits.inputEl.value = wEdits.value;
+        // 只要画布内容来自当前 source（或手改后的 edits 被接管），都刷新归属签名
+        setSourceSig(currentSourceSig());
       }
       M.editsDirty = false;
       clearTimeout(M.editsCb);
@@ -564,6 +521,8 @@ function init(node) {
     M.sel = null; M.undo = []; M.redo = [];
     if (pre) pushUndo(pre);
     syncWidgets(); renderAll(); updateToolbar(); hideMsg();
+    // 用户手改 edits 是明确意图：把这份内容归属到当前 source，后端继续以 edits 为准
+    setSourceSig(currentSourceSig());
     return true;
   }
   const writeEditsSoon = () => {
@@ -631,15 +590,27 @@ function init(node) {
     M.editsDirty = false;
     clearTimeout(M.editsCb);
     const src = (wSource.value || "").trim();
-    const edits = (wEdits.value || "").trim();
+    let edits = (wEdits.value || "").trim();
     M.S = null; M.sel = null; M.undo = []; M.redo = [];
     hideMsg();
 
-    // 加载/恢复时 edits 优先（AI 拆解结果、画布编辑）；source 变化时 source 优先。
+    // ⟲重置：显式清空 edits（旧实现 source 为空时会回退 edits，等于没重置）
+    if (clearEditsOnEmpty && !src) {
+      edits = "";
+      writeEdits({ clear: true });
+    }
+
+    // edits 只对“写入时的那份 source”有效。签名缺失（旧工作流）先按有效处理，
+    // 下面成功接管后会立即补写签名；签名不匹配则视为换源，以 source 为准。
+    const srcSig = src ? sourceSignature(src) : "";
+    const storedSig = wSrcSig ? String(wSrcSig.value || "").trim() : "";
+    const editsValid = !!edits && (!src || !storedSig || storedSig === srcSig);
+
     const candidates = [];
     if (preferEdits) {
-      if (edits) candidates.push({ text: edits, fromEdits: true });
+      if (editsValid) candidates.push({ text: edits, fromEdits: true });
       if (src) candidates.push({ text: src, fromEdits: false });
+      if (!editsValid && edits) showMsg("source 已变化：本次以 source 为准，旧画布编辑已忽略", false);
     } else {
       if (src) candidates.push({ text: src, fromEdits: false });
       else if (edits) candidates.push({ text: edits, fromEdits: true });
@@ -654,11 +625,20 @@ function init(node) {
       return;
     }
 
+    // 换源且旧 edits 已失效：先清掉，避免解析失败时继续保留会遮住 source 的旧画布
+    if (!editsValid && edits && src && !preferEdits) {
+      wEdits.value = "";
+      if (wEdits.inputEl) wEdits.inputEl.value = "";
+      setSourceSig("");
+    }
+
     let lastErr = null;
     for (const c of candidates) {
       try {
         // 从 edits 恢复时保留原始字符串；回退到 source 时必须写回，否则旧的非法 edits 会一直优先
         setStateFromText(c.text, { write: write !== false || !c.fromEdits });
+        // 旧工作流没有归属签名：成功接管后立即补写，之后换源即可正确失效
+        if (c.fromEdits) setSourceSig(currentSourceSig());
         return;
       } catch (e) {
         lastErr = e;
@@ -679,6 +659,54 @@ function init(node) {
       /* edits 内容异常时保持现状 */
     }
   }
+
+  // 反推节点写回：prose/draft → source；canvas → edits。签名存隐藏 widget，
+  // 同一结果被缓存重放时不覆盖用户手改。
+  const setWidgetInput = (w, v) => {
+    if (!w) return;
+    w.value = v;
+    if (w.inputEl) w.inputEl.value = v;
+  };
+  const setAiDraft = (v) => {
+    if (!wAi) return;
+    wAi.value = !!v;
+    if (wAi.inputEl) wAi.inputEl.checked = !!v;
+  };
+  node._mpsApplyReverse = function (p) {
+    if (!p || typeof p.text !== "string" || !p.text.trim()) {
+      return { ok: false, error: "empty" };
+    }
+    const rec = parseReverseRecord(wSig ? wSig.value : "");
+    const decision = reverseDecision(rec, {
+      ownerId: node.id,
+      sig: p.sig,
+      mode: p.mode,
+      replaceEdits: wReplace ? !!wReplace.value : true,
+      edits: wEdits ? wEdits.value : "",
+    });
+    if (decision !== "apply") return { ok: decision === "same", skipped: decision };
+
+    if (p.width) setWidgetInput(wCw, p.width);
+    if (p.height) setWidgetInput(wCh, p.height);
+    // 反推结果是“已处理好的输入”，三种形态都关掉自动拆解；prose 由用户手动点 ⚡拆解
+    setAiDraft(false);
+    if (p.mode === "prose" || p.mode === "draft") {
+      setWidgetInput(wSource, p.text);
+      rebuildFromWidgets({ preferEdits: false, write: true });
+    } else if (p.mode === "canvas") {
+      setWidgetInput(wEdits, p.text);
+      rebuildFromEdits();
+      // canvas_zh 也是当前 source 对应的画布：记录归属，换源后自动失效
+      setSourceSig(currentSourceSig());
+    } else {
+      return { ok: false, error: "mode" };
+    }
+    if (!M.S) return { ok: false, error: "parse" };
+    // 记录只存 owner/sig/mode + draftHash（不重复保存整份画布文本，控制工作流体积）
+    if (wSig) setWidgetInput(wSig, reverseRecord(node.id, p.sig, p.mode, wEdits ? wEdits.value : ""));
+    updateStatus();
+    return { ok: true };
+  };
 
   // ---------- 渲染 ----------
   function layoutCanvas() {
@@ -1189,8 +1217,7 @@ function init(node) {
       ratio = rw / rh;
     }
     const area = mpVal ? Number(mpVal) * 1000000 : curW * curH;
-    const NW = snap16(Math.sqrt(area * ratio));
-    const NH = snap16(Math.sqrt(area / ratio));
+    const [NW, NH] = clampArea(Math.sqrt(area * ratio), Math.sqrt(area / ratio));
     if (NW === curW && NH === curH) return;
     if (!isLayout) {
       // caption 形态没有框可缩放：直接把目标尺寸写进 canvas_width/height（AI 拆解与 Compiler 都读它）
@@ -1358,6 +1385,7 @@ function init(node) {
       }
       sanitizeAgentMd(this);
       rebindWidgets();
+      try { warnApiKeyIfSet(node, showKeyWarn); } catch (e) { /* noop */ }
       rebuildFromWidgets({ preferEdits: true, write: false });
     },
     onResize: () => {
@@ -1369,7 +1397,6 @@ function init(node) {
       clearTimeout(M.editsCb);
       clearTimeout(wheelIdle);
       unregisterFlush();
-      presetSubs.delete(onPresetsChanged);
       if (M.apiHooked && M.apiRef && typeof M.apiRef.removeEventListener === "function") {
         M.apiRef.removeEventListener("executed", onApiExecuted);
         M.apiRef.removeEventListener("execution_error", onApiError);
@@ -1396,7 +1423,10 @@ function init(node) {
       const im = imgs[imgs.length - 1];
       if (im.filename === lastImgName) return; // 双通道去重
       lastImgName = im.filename;
-      underlay.src = `/view?filename=${encodeURIComponent(im.filename)}&subfolder=${encodeURIComponent(im.subfolder || "")}&type=${encodeURIComponent(im.type || "temp")}&r=${Date.now()}`;
+      const viewPath = `/view?filename=${encodeURIComponent(im.filename)}&subfolder=${encodeURIComponent(im.subfolder || "")}&type=${encodeURIComponent(im.type || "temp")}&r=${Date.now()}`;
+      // 子路径部署（反向代理 /comfy/ 等）下裸 /view 会 404；优先走 api.apiURL
+      const apiRef = (typeof app !== "undefined" && app.api) || (typeof window !== "undefined" && window.app && window.app.api);
+      underlay.src = (apiRef && typeof apiRef.apiURL === "function") ? apiRef.apiURL(viewPath) : viewPath;
       M.els.undChk.checked = true;
       underlay.style.display = "";
     }
@@ -1438,11 +1468,12 @@ function init(node) {
       if (w) inputs[nm] = w.value;
     }
     inputs.ai_draft = true; // 按钮语义就是拆解
-    // 关键：必须清空 edits 再提交。后端 edits 非空即优先——带着上一次的旧草稿提交，
-    // 服务端只会透传旧布局、不触发 AI 拆解，前端也就永远收不到 mps_draft。
+    inputs.force_split = true; // 强制重拆：绕过“同输入缓存”，普通 Queue 不会设置
+    // 关键：必须清空 edits 再提交。后端 edits 非空且对应当前 source 时优先，
+    // 带着上一次的旧草稿提交，服务端只会透传旧布局、不触发 AI 拆解。
     inputs.edits = "";
     try {
-      const r = await fetch("/prompt", {
+      const r = await api.fetchApi("/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: { [String(node.id)]: { class_type: "MOSSEditor", inputs } }, client_id: api.clientId }),
@@ -1487,10 +1518,8 @@ function init(node) {
     } catch (e) { /* noop */ }
   };
 
-  // ---------- 模型配置预设：编辑器侧反馈走状态条，列表变化时刷新下拉 ----------
-  const presetNotify = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status ok"; };
-  const onPresetsChanged = () => fillPresetSelect(selPreset);
-  presetSubs.add(onPresetsChanged);
+  // LLM 配置同步反馈走状态条
+  const cfgNotify = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status ok"; };
 
   const prevExec = node.onExecuted;
   node.onExecuted = function (info) {
@@ -1542,6 +1571,7 @@ function init(node) {
   M.timer = setInterval(() => {
     tryHookApi();
     rebindWidgets();
+    try { warnApiKeyIfSet(node, showKeyWarn); } catch (e) { /* noop */ }
     try { applyWidthPin(); } catch (e) { /* noop */ }
     const sig = currentSig();
     if (sig === M.pendSig) {
@@ -1560,10 +1590,9 @@ function init(node) {
   }, 700);
 
   rebuildFromWidgets({ preferEdits: true, write: false });
-  ensurePresets().then(() => fillPresetSelect(selPreset)).catch(() => {}); // 库已缓存时立即填充
 }
 
-// 翻译器节点：挂一条 LLM 配置栏（下拉套用 / 保存 / 删除，与编辑器共享预设库）
+// 翻译器节点：挂一条 LLM 配置栏（⇄同步到另外两个 MOSS 节点）
 function initTranslator(node) {
   if (node._mpsCfgInit) return;
   node._mpsCfgInit = true;
@@ -1580,41 +1609,36 @@ function initTranslator(node) {
 
   const bar = document.createElement("div");
   bar.className = "mps-cfgbar";
-  const sel = document.createElement("select");
-  sel.title = "已保存的模型配置，选择即套用到翻译节点";
   const msg = document.createElement("span");
   msg.className = "mps-cfgmsg";
   const notify = (t) => {
     msg.textContent = t;
     setTimeout(() => { if (msg.textContent === t) msg.textContent = ""; }, 2500);
   };
-  const mkBtn = (txt, title, fn) => {
-    const b = document.createElement("button");
-    b.textContent = txt; b.title = title;
-    b.addEventListener("click", fn);
-    bar.appendChild(b);
+  const btn = document.createElement("button");
+  btn.textContent = "⇄同步";
+  btn.title = "把当前 LLM 连接配置（不含 api_key）复制到另外两个 MOSS 节点；key 建议放 config.json";
+  btn.addEventListener("click", () => {
+    const n = syncLlmConfig(node, app.graph, app);
+    notify(`已同步连接配置（不含 api_key）到另外 ${n} 个节点`);
+  });
+  bar.append(btn, msg);
+
+  // 明文 key 一次性警告（工作流/执行历史会保存 widget 的 api_key；同 key 只提示一次）
+  const showKeyWarn = (t) => {
+    try {
+      app.extensionManager?.toast?.add({ severity: "warn", summary: "MOSS Studio", detail: t, life: 6000 });
+    } catch (e) { /* toast 可选 */ }
+    notify("⚠ " + t);
   };
-  sel.addEventListener("change", () => { if (sel.value) { applyPresetTo(node, sel.value, notify); } });
-  bar.appendChild(sel);
-  mkBtn("💾", "把当前 LLM 连接配置保存为预设（与编辑器共享）", () => savePresetFrom(node, sel, notify));
-  mkBtn("🗑", "删除当前选中的预设", () => deletePresetFrom(sel, notify));
-  bar.appendChild(msg);
+  warnApiKeyIfSet(node, showKeyWarn);
+  bindApiKeyWarn(node, showKeyWarn);
 
   const domw = node.addDOMWidget("LLM配置", "mps_cfg", bar, { serialize: false, hideOnZoom: false });
   domw.computeSize = function (width) {
     return [Math.max(Number(width) || 300, 300), 44];
   };
   bar.addEventListener("pointerdown", (e) => e.stopPropagation());
-
-  const onPresetsChanged = () => fillPresetSelect(sel);
-  presetSubs.add(onPresetsChanged);
-  ensurePresets().then(() => fillPresetSelect(sel)).catch(() => {});
-
-  const prevRemove = node.onRemoved;
-  node.onRemoved = function (...a) {
-    presetSubs.delete(onPresetsChanged);
-    if (prevRemove) return prevRemove.apply(this, a);
-  };
 }
 
 app.registerExtension({

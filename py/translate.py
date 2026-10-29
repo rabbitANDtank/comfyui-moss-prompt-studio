@@ -21,6 +21,7 @@ import re
 import stat
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:
@@ -58,6 +59,127 @@ class TranslationError(ValueError):
 
 class PermanentError(TranslationError):
     """不可重试的调用错误（400/401/403/404/422 等参数或鉴权错误）。"""
+
+
+# ---------- 密钥/URL 脱敏（节点、探测、日志共用同一套规则）----------
+
+def sanitize_url(url: str) -> str:
+    """去掉 URL 里的 userinfo 和 query，只保留 scheme/host[:port]/path。"""
+    try:
+        p = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        return "***"
+    host = p.hostname or ""
+    try:
+        if p.port:
+            host += f":{p.port}"
+    except ValueError:
+        pass
+    return urllib.parse.urlunsplit((p.scheme, host, p.path, "", ""))
+
+
+def sanitize_secret(text: str, key: str = "", limit: int = 500) -> str:
+    """从任意文本中抹掉 API key、Bearer 凭证、URL userinfo 和 query。
+
+    上游 401 响应经常回显提交的 key（如 "Incorrect API key provided: sk-..."），
+    这些文本会进入控制台/错误弹窗/history，必须在所有出口统一脱敏。
+    """
+    t = str(text or "")
+    k = (key or "").strip()
+    if k and k != "EMPTY":
+        t = t.replace(k, "***")
+    # Authorization: Bearer xxx / Bearer xxx（key 已替换时同一规则兜底其它凭证）
+    t = re.sub(r"(?i)\b(authorization\s*[:=]\s*bearer\s+)[^\s,;\"'}]+", r"\1***", t)
+    t = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***", t)
+    # https://user:pass@host/... 与 ?api_key=... 查询串
+    t = re.sub(r"(?i)\b(https?://)[^/\s@]+@", r"\1***@", t)
+    t = re.sub(r"(?i)\b(https?://[^\s?#]+)\?[^\s#]*", r"\1?***", t)
+    if limit and len(t) > limit:
+        t = t[:limit] + "…"
+    return t
+
+
+# ---------- Editor 源签名：edits 只对写入时的那份 source 生效 ----------
+
+def source_signature(text: str) -> str:
+    """FNV-1a 32 位（UTF-8 bytes）；前端 web/js/editor/model.js 用同一算法。"""
+    h = 0x811C9DC5
+    for b in (text or "").encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"fnv1a:{h:08x}"
+
+
+def resolve_editor_text(source: str, edits: str, edits_source_sig: str = "") -> str:
+    """决定 Editor 实际解析哪份文本（普通 UI / 保存恢复 / API 一致）。
+
+    - edits 为空：source
+    - source 为空：edits（纯画布内容）
+    - 两者都有：只有 edits 明确记录了“写入时的 source 签名”且与当前 source 一致
+      才用 edits；签名缺失（旧工作流/无头调用）或已变化时以 source 为准，
+      避免换源后旧画布永久遮住新散文。
+    """
+    src = (source or "").strip()
+    ed = (edits or "").strip()
+    if not ed:
+        return src
+    if not src:
+        return ed
+    sig = (edits_source_sig or "").strip()
+    if not sig:
+        return src
+    return ed if sig == source_signature(src) else src
+
+
+# ---------- provider 配置 key 的安全回退 ----------
+
+_PROVIDER_DEFAULT_BASE = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "minimax": "https://api.minimax.cn/v1",
+}
+
+
+def normalize_base_url(url: str) -> str:
+    s = (url or "").strip()
+    if not s:
+        return ""
+    try:
+        p = urllib.parse.urlsplit(s)
+    except ValueError:
+        return ""
+    host = (p.hostname or "").lower()
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    netloc = host + (f":{port}" if port else "")
+    return urllib.parse.urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), "", ""))
+
+
+def config_key_allowed(provider: str, base_url: str, config: dict) -> bool:
+    """只有目标地址等于该 provider 的 config.json/官方默认地址时，才允许回退配置 key。
+
+    widget/调用者显式填写的任意地址（攻击者地址、内网服务）一律不允许使用配置 key，
+    防止把 config.json 里的真实 key 发送到调用者指定的地址。base_url 为空表示
+    走 config/默认地址，允许。
+    """
+    requested = normalize_base_url(base_url)
+    if not requested:
+        return True
+    cfg = (config or {}).get(provider) or {}
+    allowed = [cfg.get("base_url"), _PROVIDER_DEFAULT_BASE.get(provider)]
+    return any(requested == normalize_base_url(a) for a in allowed if a)
+
+
+def resolve_api_key(provider: str, base_url: str, api_key: str, config: dict):
+    """返回 (key, auth_src)。widget 显式 key 永远优先；配置 key 只回退到可信端点。"""
+    key = (api_key or "").strip()
+    if key not in ("", "EMPTY"):
+        return key, "widget"
+    cfg_key = (((config or {}).get(provider) or {}).get("api_key") or "").strip()
+    if cfg_key and config_key_allowed(provider, base_url, config):
+        return cfg_key, "config"
+    return "", "none"
 
 
 def _plugin_root() -> str:
@@ -211,6 +333,9 @@ def resolve_endpoint(provider: str, base_url: str, model: str, thinking: str, co
         # DeepSeek 现行阵容（deepseek-flash / deepseek-v4-pro）不再靠换模型名开思考，
         # 统一用默认模型 + reasoning_effort 参数（见 build_body）
         model = model or "deepseek-chat"  # 官方别名，当前映射到 flash
+    if provider == "minimax":
+        base_url = base_url or "https://api.minimax.cn/v1"
+        model = model or "MiniMax-M3.1-Flash"
     if not base_url:
         raise TranslationError(
             f"provider={provider} 的 base_url 未配置：请在节点 widget 填写，"
@@ -222,7 +347,7 @@ def resolve_endpoint(provider: str, base_url: str, model: str, thinking: str, co
 
 
 def build_body(model: str, temperature: float, thinking: str, provider: str, extra_body: str) -> dict:
-    """组装请求体（不含 messages）。extra_body 最后合并，可覆盖一切参数。"""
+    """组装请求体（不含 messages）。extra_body 最后合并；stream 始终强制 False。"""
     body = {
         "model": model,
         "messages": None,  # 由 translate() 填充
@@ -243,6 +368,14 @@ def build_body(model: str, temperature: float, thinking: str, provider: str, ext
         body["reasoning_effort"] = "none" if thinking == "off" else {
             "low": "low", "medium": "high", "high": "max",
         }[thinking]
+    elif provider == "minimax":
+        # MiniMax M3.1 Flash 不能关闭思考：发 none/disabled 会 400。
+        # off 映射到最低档 low；思考 token 与正文共用 max_completion_tokens。
+        body.pop("max_tokens", None)
+        body["max_completion_tokens"] = 65536
+        body["reasoning_effort"] = {
+            "off": "low", "low": "low", "medium": "medium", "high": "max",
+        }.get(thinking, "low")
     elif thinking != "off":
         # custom：OpenAI 风格 reasoning_effort；部署不认这个参数时用 extra_body 覆盖
         body["reasoning_effort"] = thinking
@@ -255,6 +388,9 @@ def build_body(model: str, temperature: float, thinking: str, provider: str, ext
         if not isinstance(obj, dict):
             raise TranslationError("extra_body 必须是 JSON 对象")
         body.update(obj)
+    # chat() 不支持 SSE；extra_body 写 stream=true 会让响应变成流式而解析失败。
+    # 最后强制关闭，保证“可覆盖一切”不会把节点弄坏。
+    body["stream"] = False
     return body
 
 
@@ -277,7 +413,11 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
-    host = url.split("//")[-1].split("/")[0]
+    safe_url = sanitize_url(url)
+    try:
+        host = urllib.parse.urlsplit(url).hostname or "?"
+    except ValueError:
+        host = "?"
     prefix = "[MOSS Studio] LLM" + (f" {tag}" if tag else "")
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -290,21 +430,36 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
         with _llm_opener().open(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:500]
+        detail = sanitize_secret(e.read().decode("utf-8", "replace"), key)
         print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
               f"model={body.get('model')} thinking={body.get('thinking')} "
               f"effort={body.get('reasoning_effort')} HTTP {e.code}", flush=True)
-        err = f"HTTP {e.code} [{url}]: {detail}"
+        err = sanitize_secret(f"HTTP {e.code} [{safe_url}]: {detail}", key, limit=2000)
         # 鉴权/参数/路径/校验错误重试也不会好；429/5xx/408 才值得重试
         if e.code in (408, 409, 425, 429) or e.code >= 500:
             raise TranslationError(err) from e
         raise PermanentError(err) from e
     except urllib.error.URLError as e:
-        raise TranslationError(f"连接失败 [{url}]（检查 base_url/网络/服务是否在跑）: {e.reason}") from e
+        reason = sanitize_secret(str(e.reason), key)
+        raise TranslationError(
+            f"连接失败 [{safe_url}]（检查 base_url/网络/服务是否在跑）: {reason}"
+        ) from e
     except json.JSONDecodeError as e:
-        raise TranslationError(f"响应不是 JSON [{url}]: {e}") from e
+        raise TranslationError(f"响应不是 JSON [{safe_url}]: {e}") from e
     except TimeoutError as e:
-        raise TranslationError(f"请求超时 [{url}]（>{timeout}s），可在 timeout widget 调大") from e
+        raise TranslationError(
+            f"请求超时 [{safe_url}]（>{timeout}s），可在 timeout widget 调大"
+        ) from e
+    # MiniMax 原生/兼容端点可能 HTTP 200 + base_resp.status_code 报业务错误
+    if isinstance(payload, dict) and isinstance(payload.get("base_resp"), dict):
+        br = payload["base_resp"]
+        code = br.get("status_code")
+        if code not in (0, None):
+            print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
+                  f"model={body.get('model')} 业务错误 {code}", flush=True)
+            raise PermanentError(sanitize_secret(
+                f"MiniMax 业务错误 {code}: {str(br.get('status_msg') or '').strip()}", key
+            ))
     try:
         msg = payload["choices"][0]["message"]
         content = msg.get("content") or ""
@@ -314,10 +469,10 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
         print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
               f"model={body.get('model')} thinking={body.get('thinking')} "
               f"effort={body.get('reasoning_effort')} 响应缺少 choices", flush=True)
-        raise TranslationError(
+        raise TranslationError(sanitize_secret(
             "响应缺少 choices[0].message.content: "
-            + json.dumps(payload, ensure_ascii=False)[:300]
-        ) from e
+            + json.dumps(payload, ensure_ascii=False)[:300], key
+        )) from e
     usage = payload.get("usage") or {}
     reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
     print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
@@ -328,7 +483,9 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
     if not content.strip():
         raise TranslationError("模型返回了空 content")
     if finish == "length":
-        raise TranslationError(f"输出被 max_tokens 截断（finish_reason=length），末尾 60 字: …{content[-60:]}")
+        raise TranslationError(sanitize_secret(
+            f"输出被 max_tokens 截断（finish_reason=length），末尾 60 字: …{content[-60:]}", key
+        ))
     return content
 
 
@@ -544,15 +701,18 @@ def translate(src_info: dict, *, base_url: str, api_key: str, body: dict,
         except PermanentError:
             raise
         except Exception as e:  # 统一进入重试：HTTP 错误 / JSON 解析 / 结构校验
-            print(f"[MOSS Studio] 翻译 attempt={attempt + 1} 失败: {str(e)[:300]}", flush=True)
+            safe_err = sanitize_secret(str(e), api_key, limit=300)
+            print(f"[MOSS Studio] 翻译 attempt={attempt + 1} 失败: {safe_err}", flush=True)
             last_err = e
             if attempt < MAX_RETRY:
                 base_messages = base_messages + [
                     {"role": "assistant", "content": last_raw[:2000]},
                     {"role": "user",
-                     "content": f"上一次输出被拒绝：{e}\n请修复以上问题，仅输出修正后的完整 JSON，不要任何解释。"},
+                     "content": f"上一次输出被拒绝：{safe_err}\n请修复以上问题，仅输出修正后的完整 JSON，不要任何解释。"},
                 ]
-    raise TranslationError(f"翻译失败（已重试 {MAX_RETRY} 次）: {last_err}")
+    raise TranslationError(
+        f"翻译失败（已重试 {MAX_RETRY} 次）: {sanitize_secret(str(last_err), api_key)}"
+    )
 
 
 DEFAULT_AI_DRAFT_PROMPT = """You convert an image prompt written as prose into a MOSS-Image layout draft JSON.
@@ -751,13 +911,16 @@ def prose_to_layout(prose: str, *, width: int, height: int, base_url: str, api_k
         except PermanentError:
             raise
         except Exception as e:  # HTTP / JSON / 草稿校验 统一重试
-            print(f"[MOSS Studio] AI 拆解 attempt={attempt + 1} 失败: {str(e)[:300]} "
+            safe_err = sanitize_secret(str(e), api_key, limit=300)
+            print(f"[MOSS Studio] AI 拆解 attempt={attempt + 1} 失败: {safe_err} "
                   f"| 输出开头: {last_raw[:160]!r}", flush=True)
             last_err = e
             if attempt < MAX_RETRY:
                 base_messages = base_messages + [
                     {"role": "assistant", "content": last_raw[:2000]},
                     {"role": "user",
-                     "content": f"上一次输出被拒绝：{e}\n请修复以上问题，仅输出修正后的完整 layout 草稿 JSON。"},
+                     "content": f"上一次输出被拒绝：{safe_err}\n请修复以上问题，仅输出修正后的完整 layout 草稿 JSON。"},
                 ]
-    raise TranslationError(f"AI 拆解失败（已重试 {MAX_RETRY} 次）: {last_err}")
+    raise TranslationError(
+        f"AI 拆解失败（已重试 {MAX_RETRY} 次）: {sanitize_secret(str(last_err), api_key)}"
+    )

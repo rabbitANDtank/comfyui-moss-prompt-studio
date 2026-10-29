@@ -9,5 +9,10 @@
     "model": "deepseek-flash",
     "api_key": "sk-put-your-deepseek-key-here"
   },
+  "minimax": {
+    "base_url": "https://api.minimax.cn/v1",
+    "model": "MiniMax-M3.1-Flash",
+    "api_key": "sk-put-your-minimax-key-here"
+  },
   "custom": {}
 }

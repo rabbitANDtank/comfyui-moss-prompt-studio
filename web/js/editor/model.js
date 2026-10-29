@@ -170,6 +170,36 @@ export function serializeDraft(S) {
 export const clampDim = (v) => Math.max(64, Math.min(15360, Math.round(v / 16) * 16));
 export const snap16 = (v) => clampDim(v);
 
+/** 与 py/translate.py source_signature() 完全一致的 FNV-1a（UTF-8 bytes）。 */
+export function sourceSignature(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ""));
+  let h = 0x811c9dc5;
+  for (const b of bytes) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `fnv1a:${h.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * 把宽高约束到 MOSS 官方支持范围（0.25M–4M，16 倍数），保持比例。
+ * 只用于“比例/像素预设”换算；用户手填自定义尺寸仍以手填值+基础边界为准。
+ */
+export function clampArea(W, H, minArea = 250000, maxArea = 4000000) {
+  let w = clampDim(W);
+  let h = clampDim(H);
+  const area = w * h;
+  if (!area) return [w, h];
+  if (area > maxArea || area < minArea) {
+    const up = area < minArea;
+    const f = Math.sqrt((up ? minArea : maxArea) / area);
+    const grid = up ? Math.ceil : Math.floor;
+    w = Math.max(64, grid((w * f) / 16) * 16);
+    h = Math.max(64, grid((h * f) / 16) * 16);
+  }
+  return [w, h];
+}
+
 export function clampBox(b, W, H) {
   let [x0, y0, x1, y1] = b.map(Number);
   x0 = Math.max(0, Math.min(Math.round(x0), W - 1));

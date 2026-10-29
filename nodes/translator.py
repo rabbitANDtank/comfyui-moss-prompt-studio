@@ -19,6 +19,7 @@ try:
         build_body,
         load_agent_md,
         load_config,
+        resolve_api_key,
         resolve_endpoint,
         translate,
     )
@@ -32,6 +33,7 @@ except ImportError:  # 兼容非包方式导入
         build_body,
         load_agent_md,
         load_config,
+        resolve_api_key,
         resolve_endpoint,
         translate,
     )
@@ -73,9 +75,9 @@ class MOSSTranslator:
         return {
             "required": {
                 "draft": ("STRING", {"forceInput": True, "tooltip": "中文草稿 JSON（通常来自 Editor 节点）"}),
-                "provider": (["mimo", "deepseek", "custom"], {
+                "provider": (["mimo", "deepseek", "minimax", "custom"], {
                     "default": "mimo",
-                    "tooltip": "手动切换；无自动 failover",
+                    "tooltip": "手动切换；无自动 failover。custom 可填任意 OpenAI 兼容 URL（含 Ollama / LM Studio）",
                 }),
                 "base_url": ("STRING", {
                     "default": "",
@@ -102,7 +104,7 @@ class MOSSTranslator:
                 }),
                 "extra_body": ("STRING", {
                     "default": "", "multiline": True,
-                    "tooltip": '注入口③：原始 JSON 合并进请求体，最后合并可覆盖一切，如 {"chat_template_kwargs":{"thinking":true}}',
+                    "tooltip": '注入口③：原始 JSON 合并进请求体（最后合并，stream 会被强制 false），如 {"chat_template_kwargs":{"thinking":true}}',
                 }),
             },
             "optional": {
@@ -124,9 +126,9 @@ class MOSSTranslator:
 
         cfg = load_config()
         url, mdl = resolve_endpoint(provider, base_url, model, thinking, cfg)
-        key = (api_key or "").strip()
-        if key in ("", "EMPTY"):
-            key = ((cfg.get(provider) or {}).get("api_key") or "").strip()
+        # 只有目标端点就是该 provider 的 config/默认地址时才回退配置 key，
+        # 防止工作流把 base_url 改到任意地址后把 config.json 的 key 发出去。
+        key, _auth = resolve_api_key(provider, base_url or url, api_key, cfg)
         body = build_body(mdl, temperature, thinking, provider, extra_body)
         sys_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
 

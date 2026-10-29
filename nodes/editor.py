@@ -17,6 +17,8 @@ try:
         agent_md_widget_options,
         load_config,
         prose_to_layout,
+        resolve_api_key,
+        resolve_editor_text,
         resolve_endpoint,
     )
 except ImportError:  # 兼容非包方式导入
@@ -27,6 +29,8 @@ except ImportError:  # 兼容非包方式导入
         agent_md_widget_options,
         load_config,
         prose_to_layout,
+        resolve_api_key,
+        resolve_editor_text,
         resolve_endpoint,
     )
 
@@ -51,18 +55,29 @@ class MOSSEditor:
 
     @classmethod
     def IS_CHANGED(cls, source, canvas_width, canvas_height, edits, ai_draft=False,
-                   underlay=None, **kwargs):
+                   underlay=None, reverse_in=None, replace_edits=True,
+                   last_applied_sig="", edits_source_sig="", force_split=False,
+                   **kwargs):
         import hashlib
 
         if underlay is not None:
             # 底图内容无法便宜地哈希；有底图时强制重跑，避免换图后仍显示旧预览
             return float("nan")
-        text = (edits or "").strip() or (source or "")
-        if ai_draft and '"items"' not in text:
-            # 散文+拆解模式：每次都真执行（按钮可反复触发，不受缓存影响）
+        # ⚡拆解按钮带 force_split=true：每次点击都要真正执行
+        if ai_draft and force_split:
             return float("nan")
-        # 其余情况：内容哈希，保持与默认缓存行为一致
-        return hashlib.md5(f"{text}|{canvas_width}|{canvas_height}".encode("utf-8")).hexdigest()
+        # 缓存键同时纳入 source 和 edits：只哈希 edits 会让“换了 source 但 edits
+        # 非空”命中旧缓存，新散文永远不会被解析。
+        payload = json.dumps(
+            {
+                "source": source or "", "edits": edits or "",
+                "edits_source_sig": edits_source_sig or "",
+                "canvas_width": canvas_width, "canvas_height": canvas_height,
+                "ai_draft": bool(ai_draft),
+            },
+            ensure_ascii=False, sort_keys=True,
+        )
+        return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -82,14 +97,14 @@ class MOSSEditor:
                 }),
                 "edits": ("STRING", {
                     "default": "", "multiline": True,
-                    "tooltip": "画布编辑结果（自动写回，也可手改）；非空时优先生效于 source；AI 拆解结果也会写回这里",
+                    "tooltip": "画布编辑结果（自动写回，也可手改）；仅当它对应的是当前 source 时优先，换 source 后以 source 为准（隐藏的 edits_source_sig 记录归属）；AI 拆解结果也会写回这里",
                 }),
                 "ai_draft": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "AI 拆解：输入是散文/caption 时调用 LLM 拆成带 bbox 的 layout 草稿（已是 layout 则忽略）。拆解结果 Queue 后自动写回 edits 并显示画布",
+                    "tooltip": "AI 拆解：输入是散文/caption 时调用 LLM 拆成带 bbox 的 layout 草稿（已是 layout 则忽略）。结果 Queue 后自动写回 edits 并显示画布；普通 Queue 按输入哈希缓存，重复 Queue 不重复计费；工具栏 ⚡拆解 每次都会强制重拆",
                 }),
-                "provider": (["mimo", "deepseek", "custom"], {"default": "mimo"}),
-                "base_url": ("STRING", {"default": "", "tooltip": "OpenAI 兼容地址；留空读 config.json；deepseek 预设线上 API"}),
+                "provider": (["mimo", "deepseek", "minimax", "custom"], {"default": "mimo"}),
+                "base_url": ("STRING", {"default": "", "tooltip": "OpenAI 兼容地址；留空读 config.json；custom 可填任意兼容地址（含 Ollama / LM Studio）"}),
                 "model": ("STRING", {"default": "", "tooltip": "留空读 config.json / 预设"}),
                 "api_key": ("STRING", {"default": "EMPTY"}),
                 "temperature": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05}),
@@ -112,24 +127,46 @@ class MOSSEditor:
                 "underlay": ("IMAGE", {
                     "tooltip": "底图（通常回接生成图）。注意：同一工作流里直接回接会形成依赖环；请先生成图，再 SaveImage → LoadImage 接 underlay，或另开一次对比运行",
                 }),
+                "reverse_in": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "可选：接 MOSS 图像反推节点的输出；不接时 Editor 照常使用 source/edits。prose 写入 source；draft 写入 source 并关 ai_draft；canvas 写入 edits 直接出画布。注意：反推结果在本次执行结束后才写回前端，本节点及下游在本次 Queue 中仍使用提交时的旧数据，需要再 Queue 一次完整链路",
+                }),
+                "replace_edits": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "反推换图时是否覆盖已手动修改的画布；关闭则保留手改并在反推节点提示（首次接反推且画布已有内容时也会保留）",
+                }),
+                "last_applied_sig": ("STRING", {
+                    "default": "", "hidden": True, "socketless": True,
+                    "tooltip": "内部：上次已应用的反推签名（前端维护，后端忽略）",
+                }),
+                "edits_source_sig": ("STRING", {
+                    "default": "", "hidden": True, "socketless": True,
+                    "tooltip": "内部：edits 写入时对应 source 的签名（前端维护；后端据此判断换源后是否忽略旧画布）",
+                }),
+                "force_split": ("BOOLEAN", {
+                    "default": False, "hidden": True, "socketless": True,
+                    "tooltip": "内部：⚡拆解按钮提交时强制重新拆解；普通 Queue 不设置，按输入哈希缓存",
+                }),
             },
         }
 
     def run(self, source, canvas_width, canvas_height, edits,
             ai_draft=False, provider="mimo", base_url="", model="", api_key="EMPTY",
             temperature=0.3, thinking="off", timeout=180, ai_prompt="",
-            agent_md=AGENT_DEFAULT, underlay=None):
-        # edits 非空即优先（画布写回 / AI 拆解结果 / 高级用户手改）；清空则回落到 source
-        text = (edits or "").strip() or (source or "")
+            agent_md=AGENT_DEFAULT, underlay=None, reverse_in=None,
+            replace_edits=True, last_applied_sig="", edits_source_sig="",
+            force_split=False):
+        # reverse_in / replace_edits / last_applied_sig 只供前端反推写回使用，后端不参与解析
+        # source/edits 优先级：edits 只对写入时的那份 source 生效；换源后以 source 为准。
+        text = resolve_editor_text(source, edits, edits_source_sig)
         info = sniff(text, canvas_width, canvas_height)
         ui = {}
 
         if ai_draft and info["kind"] == "caption":
             cfg = load_config()
             url, mdl = resolve_endpoint(provider, base_url, model, thinking, cfg)
-            key = (api_key or "").strip()
-            if key in ("", "EMPTY"):
-                key = ((cfg.get(provider) or {}).get("api_key") or "").strip()
+            # 只在目标端点是该 provider 的 config/默认地址时回退配置 key
+            key, _auth = resolve_api_key(provider, base_url or url, api_key, cfg)
             draft = prose_to_layout(
                 info["draft"]["caption"],
                 width=_snap16(canvas_width), height=_snap16(canvas_height),
