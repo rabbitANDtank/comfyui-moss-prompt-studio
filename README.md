@@ -2,7 +2,7 @@
 
 当前版本：**v1.7.1**
 
-> **v1.7.1 更新**：新增可选姿势注入（⚡拆解、📥本地、🎯图库点选，需另装 pose-gallery）；修复旧源迟到结果覆盖画布、Queue 卡死与旧工作流空值；阻止跨主机 302 转发 API key，并加固连接测试、缓存与资源生命周期。
+> **v1.7.1 更新**：新增可选姿势注入节点并加固连接测试、缓存与资源生命周期。
 
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接 ComfyUI 原生 MOSS-Image 节点生图。
 
@@ -19,7 +19,7 @@ LoadImage ──> MOSSImageReverse (可选) ──prose/draft/canvas──> MOSS
                                                                                                  生成图可回接 Editor 当底图对比迭代
 ```
 
-> caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（推荐工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
+
 
 推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（Editor → Translator → Compiler → 采样的完整文生图流；示例已适配 v1.7.1，旧工作流可直接加载）。
 
@@ -40,7 +40,7 @@ LoadImage ──> MOSSImageReverse (可选) ──prose/draft/canvas──> MOSS
 
 把本目录放进 `ComfyUI/custom_nodes/`（zip 解压或 git 均可），重启 ComfyUI。插件不新增第三方依赖：HTTP/图像处理使用 ComfyUI 自带的 aiohttp / Pillow / numpy。
 
-主链 3 个节点（Editor / Translator / Compiler）开箱即用；**ImageReverse 与可选的 comfyui-pose-gallery 都是可选入口**，不装/不接不影响主链。配置方法见下文「可选节点配置」。
+主链 3 个节点（Editor / Translator / Compiler）开箱即用；**ImageReverse 与 comfyui-pose-gallery 都是可选入口**，不装/不接不影响主链。配置方法见下文「可选节点配置」。
 
 ```
 custom_nodes/comfyui-moss-prompt-studio/
