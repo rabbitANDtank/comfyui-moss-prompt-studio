@@ -97,7 +97,7 @@ ComfyUI Manager 或按其 README 安装到 `custom_nodes/`，重启。接 `Pose 
 | **Compiler** | 官方口径编译 + 严格校验 |
 | **ImageReverse** | 图片 → 中文散文 / 中文草稿 / 画布 JSON（可选入口，`enabled` 默认关闭） |
 
-> 四个节点均为可选组合：最小主链只需 Editor → Translator → Compiler；ImageReverse 与姿势图库都是可选入口，不装/不接不影响主链。
+> 最小主链只需 Editor → Translator → Compiler；
 
 三个 LLM 节点（Editor / Translator / ImageReverse）的连接配置各自独立；任一节点的 **⇄同步** 会把 `provider/base_url/model/temperature/thinking/timeout` 复制到另外两个节点，**`api_key` 不参与同步**。想三个一样就同步（key 需各自配置或统一放 `config.json`），想三个不同就分别设置。
 
