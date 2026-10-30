@@ -21,7 +21,7 @@ LoadImage ──> MOSSImageReverse (可选) ──prose/draft/canvas──> MOSS
 
 > caption 形态没有框，草稿 JSON 里不含尺寸：把 Editor 的 `width`/`height` 输出接到 Compiler 的 `canvas_width`/`canvas_height` 输入，生图尺寸才会与画布一致（推荐工作流已接好）。layout 形态的尺寸随草稿自动传递，无需额外连线。
 
-推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（完整的 Editor → Translator → Compiler → CLIPTextEncode → KSampler 文生图流）。示例中的 Editor 已补齐 v1.7.1 的 22 项 widget 默认值（含姿势控件），旧工作流加载后也会自动归一化。
+推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（Editor → Translator → Compiler → 采样的完整文生图流；示例已适配 v1.7.1，旧工作流可直接加载）。
 
 **推荐工作流依赖**（缺节点用 ComfyUI Manager 安装；模型可换官方 MOSS-Image 权重，但 CLIP/VAE 必须匹配）：
 
@@ -58,67 +58,33 @@ custom_nodes/comfyui-moss-prompt-studio/
 
 1. **配置模型**：复制 `config.example.json` 为 `config.json`，按 provider 填 `base_url`/`model`/`api_key`；也可以直接在节点 widget 里填（节点值优先）。
 2. **文字输入**：把中文散文或 layout 草稿贴进 **Editor** 的 `source`；散文点 **⚡拆解** 生成画布，layout 草稿会直接识别。
-3. **可选：图片输入**：`LoadImage → MOSS 图像反推 → Editor.reverse_in`。反推节点的 `enabled` **默认关闭**；关闭时完整 Queue 不会调用视觉模型。要用反推：勾选 `enabled` 后 Queue（完整链路会执行反推），或点节点上的 **⚡反推** 单独执行（只提交反推节点及其上游、本次强制启用，不改勾选）。反推结果在本次执行结束后写回前端 Editor，因此**完整链路需要再 Queue 一次**。不用图片反推时跳过本步，直接把文字/草稿贴进 Editor 的 `source`。
+3. **可选：图片输入**：`LoadImage → MOSS 图像反推 → Editor.reverse_in`。反推节点 `enabled` 默认关闭；勾选后随完整 Queue 执行，或点 **⚡反推** 单次执行。结果在本次执行结束后写回 Editor，需**再 Queue 一次**生效；不用图片反推可跳过。
 4. **完整链路**：`Editor.draft → Translator.draft → Compiler.draft → CLIPTextEncode/采样器`。caption 形态把 Editor 的 `width`/`height` 接 Compiler 的 `canvas_width`/`canvas_height`（推荐工作流已接好）。
 5. **接生成节点**：Compiler 的 `prompt`/`clip_text` 接正向 CLIPTextEncode，`negative` 接负向，`width`/`height` 接空 Latent；不要再送 MOSS-Image Layout Prompt。
-6. **反推写回（两步）**：本次反推执行的 `executed` 事件把结果写到前端 `prose_zh → source`；`draft_zh → source 且 ai_draft=false`；`canvas_zh → edits` 直接出画布。**随后再 Queue 一次**，Editor/Translator/Compiler 才会用新数据生成。同一结果不覆盖手改；`replace_edits=false` 时首次接反推若画布已有内容也会保留并提示，打开后重新 Queue 可强制写入。
+6. **反推写回（两步）**：反推结果在执行结束后写回 Editor（prose/draft → source，canvas → edits），**随后再 Queue 一次**才会用新数据生成；同结果不覆盖手改。
 
-> **LLM 反推是可选入口**：主链 Editor → Translator → Compiler 不依赖 ImageReverse。反推节点的 `enabled` 默认关闭，且前端在检测不到 Editor 的 `reverse_in` 连接时会自动把它关掉；关闭时即使节点被完整 Queue 执行也立即返回、不调用 LLM。需要时连好 Editor 再勾选 `enabled`（随完整链路跑），或点 **⚡反推**（单独跑反推及上游，本次强制启用）。暂时不用可 Ctrl+B 旁路。
+> **LLM 反推是可选入口**：主链不依赖 ImageReverse；不用时保持 `enabled` 关闭或 Ctrl+B 旁路即可。
 
 ## 可选节点配置
 
-> 主链只需 Editor → Translator → Compiler。下面的 ImageReverse 与姿势图库都是可选入口，不装/不接不影响主链。
+> 主链只需 Editor → Translator → Compiler。ImageReverse 与姿势图库均为可选入口，不装/不接不影响主链；控件细节以节点 tooltip 为准。
 
 ### MOSS 图像反推（ImageReverse）
 
-节点随插件安装，无额外依赖；最小接法 `LoadImage → MOSS ImageReverse.image`。常用配置：
-
-| 控件 | 默认 / 建议 | 说明 |
-|---|---|---|
-| `enabled` | `false` | 默认关闭；关闭时完整 Queue 不调用视觉模型。要用：接好 Editor 后勾选并 Queue，或点节点上的 **⚡反推** 单次执行（本次强制启用，不改勾选）。 |
-| `provider` / `base_url` / `model` / `api_key` | 同 Editor/Translator | 留空读 `config.json`；本地 Ollama/LM Studio 用 `custom` + `http://127.0.0.1:11434/v1` 或 `http://127.0.0.1:1234/v1` + 准确模型 tag + `api_key=EMPTY`。 |
-| `reverse_mode` | `standard` | `concise` / `standard` / `detailed` / `manual`；只有 `manual` 会显示并生效下方细节控件。 |
-| `canvas_width` / `canvas_height` | `0` | `0` = 按输入图尺寸对齐 16；也可填与 Editor 画布一致的尺寸。 |
-| `timeout` | `180` | 本地大模型首次加载可调 300–600。 |
-| `system_prompt` / `agent_md` / `extra_instructions` / `extra_body` | 可选 | 四个注入口：整体契约 / 追加文件 / 连线逐次指令 / 原始请求体合并。 |
-
-四模式预设（非 `manual` 固定生效，不受下方细节控件影响）：
-
-| 模式 | 元素数 | 画面文字 | caption | max_tokens | image_detail | 最长边 |
-|---|---|---|---|---|---|---|
-| `concise` | 4 | 关闭 | low | 8192 | medium_low | 1024 |
-| `standard` | 6 | 允许 | medium_low | 65536 | high | 1536 |
-| `detailed` | 10 | 允许 | medium_high | 65536 | high | 1728 |
-| `manual` | 1–30 | 手动 | 手动 | 0=插件默认 | 手动 | 512–2000 |
-
-- `manual` 额外可调：`include_text`、`caption_detail`、`tag_detail`、`max_tokens`、`image_detail`、`image_max_side`、`thinking`、`temperature`、`max_items`。
-- 非 manual 模式固定 `thinking=off`；`temperature` 按模式/provider 预设（DeepSeek/MiMo/custom：concise 0.1 / standard 0.2 / detailed 0.3；MiniMax 固定 1）。
-- `max_tokens=0` 表示插件默认（按 provider 决定，不是服务商默认）；`custom` 非 manual 自动压到 16384，避免本地 32K 上下文超限。
-- 反推结果写回：`ImageReverse.prose_zh/draft_zh/canvas_zh → Editor.reverse_in`（可选）；本次执行结束后写回前端，**再 Queue 一次** 才会用新数据生成。`enabled` 的反推在完整 Queue 中会重跑，生图前建议关闭/旁路（详见下方姿势章节的“用完即关”）。
-- 敏感图片请用本地 `custom` 端点；图片会发送到所选 LLM。
+随插件安装，最小接法 `LoadImage → MOSS ImageReverse.image`。`enabled` 默认关闭；要用时接好 Editor 后勾选并 Queue，或点 **⚡反推** 单次执行。`provider`/`base_url`/`model`/`api_key` 与 Editor/Translator 相同（留空读 `config.json`；本地 Ollama/LM Studio 用 `custom` + 准确模型 tag + `EMPTY`）。`reverse_mode` 提供 `concise`/`standard`/`detailed`/`manual` 四档：非 manual 使用预设，manual 才启用 temperature/thinking/max_items/max_tokens/image_detail/image_max_side 等细节控件。模式取值、预算与写回细节以节点 tooltip 为准；结果写回 Editor 后需再 Queue 一次。生图前建议关闭/旁路 `enabled` 的反推，避免完整 Queue 重跑并覆盖画布。
 
 ### comfyui-pose-gallery（可选第三方）
 
-- 安装：ComfyUI Manager 搜索 `comfyui-pose-gallery` 或按其 README 解压到 `custom_nodes/`，重启 ComfyUI；本插件**不分发**其图片/索引。
-- 接线：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。也可不装图库，直接在 `pose_in` 手填或在 🎯 面板点选。
-- `pose_mode` 设 `自动`（默认）；单人/双人分配、⚡拆解/📥姿势 用法见下方「姿势参考」。
-- 许可与免责：代码/画廊页面 MIT；姿势图片、缩略图与原始数据**不适用 MIT**，权利归原作者 ギア（@giaaibusi），中文数据由 Anhao 整理；请遵守其 LICENSE/NOTICE。
+ComfyUI Manager 或按其 README 安装到 `custom_nodes/`，重启。接 `Pose Gallery.description → Editor.pose_in`（双人再接 `pose_in_2`）；也可不装图库，直接在 `pose_in` 手填或 🎯 点选。`pose_mode` 默认 `自动`。用法与许可见下方「姿势参考」。
 
 ## 姿势参考（可选：接 comfyui-pose-gallery）
 
-**Editor 的 `pose_in` / `pose_in_2` 是可选输入：不接入时 Editor / Translator / Compiler 与旧版行为完全一致**（有回归测试保证 system prompt 逐字节不变）。需要丰富单人/双人姿势时：
+**不接时 Editor / Translator / Compiler 与旧版行为完全一致**。需要姿势控制时：
 
-1. 另装 [comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery)（本地中文姿势图库：1,439 张线稿，含 275 张双人姿势）。本插件只消费其 `description` 文本输出（形如 `全身单人・标准系 / 跪立 / 四肢着地・单腿后高抬 / 俯视`），不携带其任何图片/索引数据（许可与免责见本节末）。
-2. 连线（可选）：`Pose Gallery.description → Editor.pose_in`；双人分别指定姿势时再接 `pose_in_2`。v1.7.1 起这两个输入也是可手填/点选的 widget（**连线值优先**），不装图库也能直接在 widget 里写动作描述。零成本福利：`Pose Gallery.image → Editor.underlay` 可把姿势线稿当底图，画 bbox 时直接对齐姿势轮廓——底图是**拉伸铺满**画布的，pose 图（3:4 竖屏）里人物的左右/上下/前后分布与画布坐标一一对应；想完全无形变，把画布宽高设成 3:4 的 16 倍数（如 896×1184、960×1280）。
-3. 两个注入入口，各干各的活：
-   - **⚡拆解（LLM 丰富版）**：连着姿势拆解，LLM 把姿势短语展开成具体肢体动作句写进角色 caption（一次 LLM 调用，收费）。换姿势后重点一次 ⚡拆解 即重新应用。**姿势与散文动作强冲突时（如散文"站立"注入"仰卧/跪立"），建议同时把 `thinking` 开到 `low`**：真机实测 off 档偶发忽略姿势参考（写成散文动作），low 档遵循显著更稳。
-   - **📥姿势（本地短语版，拆解完成后随时用）**：先用 **🎯姿势①/②** 打开图库点选面板（体系/分类/视角筛选 + 搜索 + 缩略图 + ↻刷新索引；选中写入 `pose_in`/`pose_in_2`），再点画布工具栏 **📥姿势**，图库原句以 `；姿势：姿势名称（视角）` 段写入角色 caption（如 `；姿势：四肢着地・单腿后高抬（俯视）`——视角是参考线稿的观察角度，帮助模型还原肢体朝向，不会被转写成镜头指令）——不调 LLM、免费、秒完成，重复注入是替换不是叠加，写完可在检查器手改。注入只改 caption 姿势段，**不会动你手动拖过的画布布局**。注意短语约束较粗：真机 5 姿势实测 4/5 直接生效，"仰卧"这类与场景先验强冲突的复杂姿势建议走 ⚡拆解丰富版（必要时 `thinking=low`），或手改 caption 补充细节；要骨骼级精确控制请配 pose-gallery 的深度控制工作流（文字姿势约束天然弱于深度图）。
-4. 📥姿势 的注入目标：**选中角色→只注入它**；未选中→双参考按 bbox 左右分配（`pose_in`→左、`pose_in_2`→右，上下/前后构图同理）、双人系列姿势（体系含"双人"）给两人各写一段互动描述、单姿势给最突出的角色。
-5. `pose_mode` 闸门：`自动`（默认，拆解 LLM 按人数套用）/`强制双人`（散文人数含糊时手动确认）/`关闭`（忽略姿势输入，免拔线做 A/B 对照；📥姿势 按钮也会被拒绝）。
-6. 画布上交换两人的姿势：选中任一角色条目，检查器出现 **🔄 对调两人姿势**——只交换两个 caption 末尾的姿势段，不重拆、不调 LLM、支持撤销。左右/上下/前后构图通用。
-7. 注意：普通 Queue 不注入、不拆解（按输入哈希缓存）；⚡拆解/📥姿势 按钮都会自动带上姿势节点等上游一起提交，但**会自动剔除反推链上游**（避免反推被搭车重跑重复计费、以及它写回的新散文让本次拆解/注入画布立即失效回退）。反推产物同样适用：prose_zh 落 source 后走 ⚡拆解，draft_zh/canvas_zh 落好的画布随时可 📥姿势。`pose_in` 也可以接任意手写的动作描述文本，不依赖 pose-gallery。
-   - **反推"用完即关"**：拆解/画布就绪后准备生图时，请把反推节点 `enabled` 关掉（或旁路）。真机踩坑：完整 Queue 会重跑 enabled 的反推，它写回的新散文会让当前画布立即回退成 caption 文本（画面上"只剩文字没有框"）；改过反推参数（画布尺寸/模式等）时签名变化，同图也视为新结果照样写回。同图同参的重放已被前端自动跳过（不覆盖已有成果），参数变了就不会跳过。
-8. 姿势源与旧工作流兼容（v1.7.1）：`pose_in`/`pose_in_2` 现在是字符串 widget——可 🎯 点选、手填动作描述，或连线任意 STRING 节点（Pose Gallery.description / PrimitiveString）；**连线值优先于 widget**，有连线时点选会先询问是否断开。ComfyUI 原生 `PrimitiveNode` 现在也可以给该 widget 供值。加载 v1.7 之前的工作流时，空的 `pose_mode`/`apply_pose` 会自动回落到「自动」/-1，无需手动改。若 `pose_in`/`pose_in_2` 连的是 `PrimitiveString` 这类可写字符串节点，🎯点选会直接写入该节点并自动命名为「姿势人物①/②」，**连线保留**；连的是 Pose Gallery 等计算输出（不可写）才提示断开。也**不要把 MOSS 反推节点的输出当姿势源**——它每次执行都会触发事件写回，与拆解/注入画布互相竞争导致画布回退。
+1. 另装 [comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery)（本地中文姿势图库）；本插件只消费其 `description` 文本输出，不分发其图片/索引。
+2. 接法：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。`pose_in`/`pose_in_2` 也支持手填和 🎯 点选（连线优先）。
+3. 两种注入：**⚡拆解**（LLM 展开姿势，一次 LLM 调用）与 **📥姿势**（本地短语版，拆解后免费秒注入）；`pose_mode` 控制自动/强制双人/关闭；检查器可「🔄 对调两人姿势」。
+4. 文字姿势约束弱于深度图，效果受模型影响；复杂姿势建议 ⚡拆解 + `thinking=low`，骨骼级控制请走 pose-gallery 的深度链路。具体控件与注入规则以节点 tooltip 为准。
 
 > **pose-gallery 许可与免责**：其节点代码/画廊页面为 MIT；姿势图片、缩略图与原始数据不适用 MIT，权利归原作者 ギア（@giaaibusi），中文数据由 Anhao 整理（上游：wangweihong/ai-pose-gallery-zh、anhao/ai-pose-gallery-zh）。本插件不分发这些素材，仅运行时读取本地索引/缩略图；请阅读其 LICENSE/NOTICE 并保留署名。其 README 亦提示仅验证部分姿势组，手脚细节与精确关节角度可能偏离参考，请自行评估生成结果。
 
@@ -173,6 +139,7 @@ node --test tests/*.test.mjs  # 75 用例（glob 自动包含所有前端测试�
 - 编译器与校验规则移植自 [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 官方 skill（`skills/moss-image-prompt-enhancer`），保证与官方口径一致。
 - 画布交互改编自 [swan7-py/json-prompt-visualizer](https://github.com/swan7-py/json-prompt-visualizer) 的 canvas.py（拖拽/缩放/撤销/重叠闸门/坐标换算思路），适配为 ComfyUI 前端扩展。
 - 指令文件的追加注入语义参考了 [Codex-X](https://github.com/yynxxxxx/Codex-X) 的 Append 托管块设计。
+- 姿势图库集成与中文姿势数据来自 [wangweihong/comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery)；感谢开发者 wangweihong，以及原始姿势画作者 ギア（@giaaibusi）与中文数据整理 Anhao。
 
 ## 使用须知与免责声明
 
