@@ -40,6 +40,8 @@ LoadImage ──> MOSSImageReverse (可选) ──prose/draft/canvas──> MOSS
 
 把本目录放进 `ComfyUI/custom_nodes/`（zip 解压或 git 均可），重启 ComfyUI。插件不新增第三方依赖：HTTP/图像处理使用 ComfyUI 自带的 aiohttp / Pillow / numpy。
 
+主链 3 个节点（Editor / Translator / Compiler）开箱即用；**ImageReverse 与可选的 comfyui-pose-gallery 都是可选入口**，不装/不接不影响主链。配置方法见下文「可选节点配置」。
+
 ```
 custom_nodes/comfyui-moss-prompt-studio/
 ├── nodes/ + py/        # 四个节点与后端核心
@@ -63,7 +65,44 @@ custom_nodes/comfyui-moss-prompt-studio/
 
 > **LLM 反推是可选入口**：主链 Editor → Translator → Compiler 不依赖 ImageReverse。反推节点的 `enabled` 默认关闭，且前端在检测不到 Editor 的 `reverse_in` 连接时会自动把它关掉；关闭时即使节点被完整 Queue 执行也立即返回、不调用 LLM。需要时连好 Editor 再勾选 `enabled`（随完整链路跑），或点 **⚡反推**（单独跑反推及上游，本次强制启用）。暂时不用可 Ctrl+B 旁路。
 
-> 节点参数、反推四模式和 manual 细节参数都以节点 tooltip 为准，这里不重复。图像反推会把图片发送到所选 LLM 端点；敏感图片用本地 `custom`。
+## 可选节点配置
+
+> 主链只需 Editor → Translator → Compiler。下面的 ImageReverse 与姿势图库都是可选入口，不装/不接不影响主链。
+
+### MOSS 图像反推（ImageReverse）
+
+节点随插件安装，无额外依赖；最小接法 `LoadImage → MOSS ImageReverse.image`。常用配置：
+
+| 控件 | 默认 / 建议 | 说明 |
+|---|---|---|
+| `enabled` | `false` | 默认关闭；关闭时完整 Queue 不调用视觉模型。要用：接好 Editor 后勾选并 Queue，或点节点上的 **⚡反推** 单次执行（本次强制启用，不改勾选）。 |
+| `provider` / `base_url` / `model` / `api_key` | 同 Editor/Translator | 留空读 `config.json`；本地 Ollama/LM Studio 用 `custom` + `http://127.0.0.1:11434/v1` 或 `http://127.0.0.1:1234/v1` + 准确模型 tag + `api_key=EMPTY`。 |
+| `reverse_mode` | `standard` | `concise` / `standard` / `detailed` / `manual`；只有 `manual` 会显示并生效下方细节控件。 |
+| `canvas_width` / `canvas_height` | `0` | `0` = 按输入图尺寸对齐 16；也可填与 Editor 画布一致的尺寸。 |
+| `timeout` | `180` | 本地大模型首次加载可调 300–600。 |
+| `system_prompt` / `agent_md` / `extra_instructions` / `extra_body` | 可选 | 四个注入口：整体契约 / 追加文件 / 连线逐次指令 / 原始请求体合并。 |
+
+四模式预设（非 `manual` 固定生效，不受下方细节控件影响）：
+
+| 模式 | 元素数 | 画面文字 | caption | max_tokens | image_detail | 最长边 |
+|---|---|---|---|---|---|---|
+| `concise` | 4 | 关闭 | low | 8192 | medium_low | 1024 |
+| `standard` | 6 | 允许 | medium_low | 65536 | high | 1536 |
+| `detailed` | 10 | 允许 | medium_high | 65536 | high | 1728 |
+| `manual` | 1–30 | 手动 | 手动 | 0=插件默认 | 手动 | 512–2000 |
+
+- `manual` 额外可调：`include_text`、`caption_detail`、`tag_detail`、`max_tokens`、`image_detail`、`image_max_side`、`thinking`、`temperature`、`max_items`。
+- 非 manual 模式固定 `thinking=off`；`temperature` 按模式/provider 预设（DeepSeek/MiMo/custom：concise 0.1 / standard 0.2 / detailed 0.3；MiniMax 固定 1）。
+- `max_tokens=0` 表示插件默认（按 provider 决定，不是服务商默认）；`custom` 非 manual 自动压到 16384，避免本地 32K 上下文超限。
+- 反推结果写回：`ImageReverse.prose_zh/draft_zh/canvas_zh → Editor.reverse_in`（可选）；本次执行结束后写回前端，**再 Queue 一次** 才会用新数据生成。`enabled` 的反推在完整 Queue 中会重跑，生图前建议关闭/旁路（详见下方姿势章节的“用完即关”）。
+- 敏感图片请用本地 `custom` 端点；图片会发送到所选 LLM。
+
+### comfyui-pose-gallery（可选第三方）
+
+- 安装：ComfyUI Manager 搜索 `comfyui-pose-gallery` 或按其 README 解压到 `custom_nodes/`，重启 ComfyUI；本插件**不分发**其图片/索引。
+- 接线：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。也可不装图库，直接在 `pose_in` 手填或在 🎯 面板点选。
+- `pose_mode` 设 `自动`（默认）；单人/双人分配、⚡拆解/📥姿势 用法见下方「姿势参考」。
+- 许可与免责：代码/画廊页面 MIT；姿势图片、缩略图与原始数据**不适用 MIT**，权利归原作者 ギア（@giaaibusi），中文数据由 Anhao 整理；请遵守其 LICENSE/NOTICE。
 
 ## 姿势参考（可选：接 comfyui-pose-gallery）
 
