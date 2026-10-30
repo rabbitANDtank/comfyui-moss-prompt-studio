@@ -16,7 +16,13 @@ import {
   clampDim, clampArea, clampBox, csvParse, csvShow, sourceSignature,
 } from "./editor/model.js";
 import { editorFlushRegistry, mountEditorLifecycle, mountCompilerSync } from "./editor/comfy-hooks.js";
-import { parseReverseRecord, reverseDecision, reverseRecord } from "./editor/reverse.js";
+import { parseReverseRecord, reverseDecision, reverseRecord, textHash } from "./editor/reverse.js";
+import { draftSourceAttribution, editsOwnerSignature, rebuildCandidates } from "./editor/source_guard.js";
+import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode } from "./editor/submit_gate.js";
+import { POSE_MARKER, poseMarkedItems, swapPoseSegments, buildSplitPayload,
+  normalizePoseMode, normalizeApplyPose, normalizePoseText, resolvePoseSource,
+  poseSourceLabel, poseWriteTarget, poseSourceWritable } from "./editor/pose.js";
+import { buildFacets, filterPoses, groupByPose, toDescription, poseThumbUrl } from "./editor/pose_picker.js";
 import { syncLlmConfig, warnApiKeyIfSet, bindApiKeyWarn } from "./editor/llm_config.js";
 
 console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
@@ -141,9 +147,25 @@ function init(node) {
     if (sig) wSig = sig;
     if (ss) wSrcSig = ss;
     normalizeReplaceEdits();
+    normalizePoseWidgets();
     bindEditsWidget();
     return !!(wSource && wEdits && wCw && wCh);
   };
+  // 旧工作流缓存的姿势 widget 可能是 ""/null（widgets_values 错位或新控件缺省）：
+  // 服务端会直接拒绝 pose_mode="" 与 apply_pose=""，这里在 configure/轮询时静默修回默认值。
+  function normalizePoseWidgets() {
+    const fix = (w, v) => {
+      if (!w || w.value === v) return;
+      w.value = v;
+      if (w.inputEl) w.inputEl.value = v;
+    };
+    const wMode = W("pose_mode"), wApply = W("apply_pose");
+    const wPose = W("pose_in"), wPose2 = W("pose_in_2");
+    if (wMode) fix(wMode, normalizePoseMode(wMode.value));
+    if (wApply) fix(wApply, normalizeApplyPose(wApply.value));
+    if (wPose) fix(wPose, normalizePoseText(wPose.value));
+    if (wPose2) fix(wPose2, normalizePoseText(wPose2.value));
+  }
   // 旧工作流缓存的新增 widget 可能是 ""，不是布尔；按“未设置”处理为默认开
   function normalizeReplaceEdits() {
     if (!wReplace) return;
@@ -246,6 +268,12 @@ function init(node) {
   }, "复制编辑后的草稿 JSON");
   // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布
   const btnSplit = mkBtn("⚡拆解", () => runAiSplit(btnSplit), "把 source 散文拆解为布局草稿（只执行本节点，不跑整个工作流）");
+  // 📥姿势：把 pose_in/pose_in_2 的图库姿势短语本地注入已拆解画布的角色 caption
+  // （不调 LLM、免费秒完成；要 LLM 展开的丰富动作描述走 ⚡拆解 路径）
+  const btnPose = mkBtn("📥姿势", () => applyPose(btnPose), "把姿势参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、双人姿势给两人、单姿势给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销");
+  // 🎯姿势①/②：从图库点选姿势（体系/分类/视角筛选 + 关键词搜索），写入 pose_in widget
+  mkBtn("🎯姿势①", () => openPosePicker(1), "打开姿势库点选面板（需已安装 comfyui-pose-gallery）：按体系/分类/视角筛选或搜索，点视角按钮选用，写入 pose_in。也可在 widget 里手填或连线");
+  mkBtn("🎯姿势②", () => openPosePicker(2), "同 🎯姿势①，写入 pose_in_2（双人分别指定姿势时给另一角色）");
   mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); },
     "重置为 source 粘贴源：丢弃当前画布编辑并清空 edits（会二次确认；不能用 ↶撤销 恢复）");
 
@@ -294,6 +322,12 @@ function init(node) {
   const overlap = document.createElement("div");
   pnlOv.appendChild(overlap);
 
+  // 运行状态行（v1.7.1）：本节点执行状态轮询 + 语义事件（散文已收到/姿势已注入…），
+  // 与下方画布状态行（布局/校验）分开显示
+  const runStatus = document.createElement("div");
+  runStatus.className = "mps-status mps-runstatus";
+  runStatus.textContent = "○ 待命：本节点尚未执行";
+
   const status = document.createElement("div");
   status.className = "mps-status";
 
@@ -326,6 +360,7 @@ function init(node) {
   main.appendChild(vdiv);
   main.appendChild(side);
   root.appendChild(main);
+  root.appendChild(runStatus);
   root.appendChild(status);
 
   // 底部调整条：拖动同时更新画布高度与节点高度（同步增减，避免布局反馈环）
@@ -361,9 +396,16 @@ function init(node) {
   const M = (node._mps = {
     S: null, sel: null, undo: [], redo: [], inspPre: null, canvasH: 660,
     wSource, wEdits, wCw, wCh,
-    els: { canvasWrap, canvas, underlay, undChk, capBox, msg, layers, insp, overlap, status, snapChk, btnUndo, btnRedo, btnDel, pnlLayers, pnlInsp, pnlOv },
+    els: { canvasWrap, canvas, underlay, undChk, capBox, msg, layers, insp, overlap, status, runStatus, snapChk, btnUndo, btnRedo, btnDel, pnlLayers, pnlInsp, pnlOv },
     builtSig: null, pendSig: null, timer: null, wt: null,
     editsDirty: false, editsCb: null, writingEdits: false,
+    // source 归属（P0-1）：stateSrcSig=当前画布对应的 source 签名；split/pose/queueSrcSig=
+    // 已提交但尚未回来的异步结果对应的 source 签名；lastDraft*=双通道去重。
+    stateSrcSig: "", splitSrcSig: "", poseSrcSig: "", queueSrcSig: "",
+    lastDraftText: "", lastDraftAt: 0,
+    // F3/F4：提交互斥 / 最近一次拆解-注入的 prompt_id / 资源句柄
+    submitting: false, lastSubmitId: "", poseLinkWarned: false,
+    queueTimer: null, ro: null,
   });
 
   // 明文 key 一次性警告（工作流/执行历史会保存 widget 的 api_key；同 key 只提示一次）
@@ -411,8 +453,9 @@ function init(node) {
   M.pinned = false;
   applyWidthPin();
   try {
-    new ResizeObserver(applyResponsive).observe(root);
-  } catch (e) { /* 不支持 ResizeObserver 时维持固定布局 */ }
+    M.ro = new ResizeObserver(applyResponsive);
+    M.ro.observe(root);
+  } catch (e) { /* 不支持 ResizeObserver 时维持固定布局 */ M.ro = null; }
 
   undChk.addEventListener("change", () => {
     underlay.style.display = undChk.checked && underlay.src ? "" : "none";
@@ -440,8 +483,13 @@ function init(node) {
       if (wCw.inputEl) wCw.inputEl.value = wCw.value;
       if (wCh.inputEl) wCh.inputEl.value = wCh.value;
     }
-    M.builtSig = currentSig();
-    M.pendSig = M.builtSig;
+    const nowSig = currentSig();
+    // 画布来自旧 source 时不能把 builtSig 标成当前 source：否则 700ms 轮询会认为
+    // “已构建”而不再从新 source 重建，旧画布就被永久当成新 source 的画布。
+    // source 为空时 edits 是唯一内容来源，保持“已构建”，否则轮询会每 700ms 重复重建。
+    const srcText = (wSource.value || "").trim();
+    M.builtSig = (srcText && M.stateSrcSig && M.stateSrcSig !== currentSourceSig()) ? "" : nowSig;
+    M.pendSig = nowSig;
   }
 
   // edits 归属签名：写入画布内容时同时记录当时 source 的签名。后端/加载恢复据此
@@ -463,13 +511,17 @@ function init(node) {
         if (opts.clear) {
           wEdits.value = "";
           if (wEdits.inputEl) wEdits.inputEl.value = "";
+          M.stateSrcSig = "";
           setSourceSig("");
         }
       } else {
         wEdits.value = serializeDraft(M.S);
         if (wEdits.inputEl) wEdits.inputEl.value = wEdits.value;
-        // 只要画布内容来自当前 source（或手改后的 edits 被接管），都刷新归属签名
-        setSourceSig(currentSourceSig());
+        // 只要画布内容来自当前 source（或手改后的 edits 被接管），都刷新归属签名。
+        // 关键（P0-1）：M.S 可能是旧 source 的残留画布，此时必须沿用生成它的
+        // source 签名（M.stateSrcSig），不能盖成 currentSourceSig()，否则后端会把
+        // 旧画布当成新 source 的当前画布优先使用。
+        setSourceSig(editsOwnerSignature(M.stateSrcSig, currentSourceSig()));
       }
       M.editsDirty = false;
       clearTimeout(M.editsCb);
@@ -518,11 +570,12 @@ function init(node) {
     if (M.S && JSON.stringify(next) === JSON.stringify(M.S)) return true;
     const pre = M.S ? snapshot() : null;
     M.S = next;
+    M.stateSrcSig = currentSourceSig();
     M.sel = null; M.undo = []; M.redo = [];
     if (pre) pushUndo(pre);
     syncWidgets(); renderAll(); updateToolbar(); hideMsg();
     // 用户手改 edits 是明确意图：把这份内容归属到当前 source，后端继续以 edits 为准
-    setSourceSig(currentSourceSig());
+    setSourceSig(M.stateSrcSig);
     return true;
   }
   const writeEditsSoon = () => {
@@ -530,8 +583,17 @@ function init(node) {
     M.wt = setTimeout(writeEdits, 300);
   };
   const flushEdits = () => {
+    // F3：拆解/注入 POST 在飞时拒绝 Queue（含 Ctrl+Enter），避免用拆解前画布提交
+    if (M.submitting) {
+      M.els.status.textContent = "已有拆解/注入任务在飞，请等待完成";
+      M.els.status.className = "mps-status err";
+      return false;
+    }
     clearTimeout(M.wt);
     rebindWidgets();
+    // 记录本次 Queue 提交对应的 source：全流程 Queue 也可能返回 mps_draft
+    // （ai_draft 散文拆解），结果回来时据此判断 source 是否已变。
+    M.queueSrcSig = currentSourceSig();
     try {
       // 用户刚手改过 edits：先接管；有效且 source 未变时保留用户原始文本，不重排覆盖。
       // 不只依赖 widget callback：Queue 前直接对比文本，callback 没触发也能兜住。
@@ -572,7 +634,12 @@ function init(node) {
 
   function setStateFromText(src, opts = {}) {
     M.S = applySourceText(src);
-    M.sel = null; M.undo = []; M.redo = [];
+    // 记录这份画布是由哪份 source 生成的；写入 edits 时沿用该签名做归属（P0-1）。
+    if ("srcSig" in opts) M.stateSrcSig = String(opts.srcSig || "");
+    M.sel = null;
+    // 📥姿势 注入保留既有撤销栈（F5）；拆解/换源/反推仍清空
+    if (!opts.keepUndo) M.undo = [];
+    M.redo = [];
     hideMsg();
     syncWidgets(); renderAll();
     if (opts.write !== false) {
@@ -604,17 +671,8 @@ function init(node) {
     // 下面成功接管后会立即补写签名；签名不匹配则视为换源，以 source 为准。
     const srcSig = src ? sourceSignature(src) : "";
     const storedSig = wSrcSig ? String(wSrcSig.value || "").trim() : "";
-    const editsValid = !!edits && (!src || !storedSig || storedSig === srcSig);
-
-    const candidates = [];
-    if (preferEdits) {
-      if (editsValid) candidates.push({ text: edits, fromEdits: true });
-      if (src) candidates.push({ text: src, fromEdits: false });
-      if (!editsValid && edits) showMsg("source 已变化：本次以 source 为准，旧画布编辑已忽略", false);
-    } else {
-      if (src) candidates.push({ text: src, fromEdits: false });
-      else if (edits) candidates.push({ text: edits, fromEdits: true });
-    }
+    const { editsValid, candidates } = rebuildCandidates({ preferEdits, src, edits, srcSig, storedSig });
+    if (preferEdits && !editsValid && edits) showMsg("source 已变化：本次以 source 为准，旧画布编辑已忽略", false);
 
     if (!candidates.length) {
       showMsg("粘贴源为空 —— 在 source 框里贴入上游产出的中文草稿 JSON", false);
@@ -625,38 +683,48 @@ function init(node) {
       return;
     }
 
-    // 换源且旧 edits 已失效：先清掉，避免解析失败时继续保留会遮住 source 的旧画布
-    if (!editsValid && edits && src && !preferEdits) {
-      wEdits.value = "";
-      if (wEdits.inputEl) wEdits.inputEl.value = "";
-      setSourceSig("");
-    }
-
     let lastErr = null;
     for (const c of candidates) {
       try {
+        // 这份画布由哪份 source 生成：fromEdits 沿用保存的归属签名（旧工作流没有
+        // 签名时按当前 source 处理），fromSource 则对应当前 source（P0-1）。
+        const candSig = c.fromEdits ? (storedSig || currentSourceSig()) : currentSourceSig();
         // 从 edits 恢复时保留原始字符串；回退到 source 时必须写回，否则旧的非法 edits 会一直优先
-        setStateFromText(c.text, { write: write !== false || !c.fromEdits });
+        setStateFromText(c.text, { write: write !== false || !c.fromEdits, srcSig: candSig });
         // 旧工作流没有归属签名：成功接管后立即补写，之后换源即可正确失效
-        if (c.fromEdits) setSourceSig(currentSourceSig());
+        if (c.fromEdits) setSourceSig(candSig);
         return;
       } catch (e) {
         lastErr = e;
       }
     }
 
-    // 解析失败：保留原 edits，不写空，避免把已保存的布局冲掉
+    // 解析失败：保留原 edits，不写空，避免把已保存的布局冲掉。
+    // 只有旧 edits 已明确不属于当前 source、且没有任何候选可接管时，才按原行为
+    // 清掉，避免它继续遮住 source（F8：清空动作必须在候选解析失败之后）。
+    if (!editsValid && edits && src && !preferEdits) {
+      wEdits.value = "";
+      if (wEdits.inputEl) wEdits.inputEl.value = "";
+      setSourceSig("");
+    }
     showMsg(String((lastErr && lastErr.message) || lastErr || "无法解析"), true);
     M.builtSig = M.pendSig = currentSig();
     renderAll(); updateToolbar();
   }
 
-  // AI 拆解结果（ui.mps_draft）写回 edits 后从这里重建画布
-  function rebuildFromEdits() {
+  // AI 拆解结果（ui.mps_draft）写回 edits 后从这里重建画布。
+  // srcSig：生成这份结果时使用的 source 签名（默认当前 source；迟到结果由调用方传入）。
+  // opts.keepUndo：📥姿势 注入时保留既有撤销栈（F5）。
+  function rebuildFromEdits(srcSig, opts = {}) {
     try {
-      setStateFromText(wEdits.value);
+      setStateFromText(wEdits.value, {
+        srcSig: srcSig !== undefined ? srcSig : currentSourceSig(),
+        keepUndo: !!opts.keepUndo,
+      });
+      return true;
     } catch (e) {
       /* edits 内容异常时保持现状 */
+      return false;
     }
   }
 
@@ -683,6 +751,8 @@ function init(node) {
       mode: p.mode,
       replaceEdits: wReplace ? !!wReplace.value : true,
       edits: wEdits ? wEdits.value : "",
+      // prose/draft 实际写 source：same-sig 保护必须按写入目标判断（F7）
+      source: wSource ? wSource.value : "",
     });
     if (decision !== "apply") return { ok: decision === "same", skipped: decision };
 
@@ -695,7 +765,8 @@ function init(node) {
       rebuildFromWidgets({ preferEdits: false, write: true });
     } else if (p.mode === "canvas") {
       setWidgetInput(wEdits, p.text);
-      rebuildFromEdits();
+      // 解析失败时保留原画布与归属签名，别把旧画布盖成当前 source（P0-1 同类风险）
+      if (!rebuildFromEdits(currentSourceSig())) return { ok: false, error: "parse" };
       // canvas_zh 也是当前 source 对应的画布：记录归属，换源后自动失效
       setSourceSig(currentSourceSig());
     } else {
@@ -705,6 +776,7 @@ function init(node) {
     // 记录只存 owner/sig/mode + draftHash（不重复保存整份画布文本，控制工作流体积）
     if (wSig) setWidgetInput(wSig, reverseRecord(node.id, p.sig, p.mode, wEdits ? wEdits.value : ""));
     updateStatus();
+    rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}），再 Queue 一次完整链路生效`, "ok");
     return { ok: true };
   };
 
@@ -974,6 +1046,19 @@ function init(node) {
     // palette：该元素自身配色（hex 色块编辑）
     insp.appendChild(h5("palette 元素配色（hex）"));
     buildPaletteEditor(insp, () => it.palette || [], setOptArr(it, "palette"));
+    // 姿势对调：恰好两个带 ；姿势： 标记的角色条目时出现（左右/上下/前后构图通用，
+    // 只交换两个 caption 末尾的姿势段，不重拆、不调 LLM）
+    if (it.label === "character" && poseMarkedItems(d).length === 2) {
+      const sw = document.createElement("button");
+      sw.className = "mps-mini"; sw.style.marginTop = "6px";
+      sw.textContent = "🔄 对调两人姿势";
+      sw.title = "交换两个角色 caption 末尾「" + POSE_MARKER + "…」段（拆解时由姿势参考生成）";
+      sw.addEventListener("click", () => {
+        pushUndo(snapshot());
+        if (swapPoseSegments(d)) afterChange();
+      });
+      insp.appendChild(sw);
+    }
     const del = document.createElement("button");
     del.className = "mps-mini"; del.style.marginTop = "6px"; del.textContent = "🗑 删除该元素";
     del.addEventListener("click", () => delItem(M.sel));
@@ -1021,7 +1106,7 @@ function init(node) {
     const errs = validateJS(M.S);
     if (!M.S) { status.className = "mps-status"; status.textContent = "—"; return; }
     const head = M.S.kind === "caption"
-      ? `caption · ${M.S.caption.length} 字 · 目标 ${+wCw.value || 1024}×${+wCh.value || 1024}` + (wAi && wAi.value ? " · ⚡AI 拆解已启用：Queue 一次生成布局画布" : "")
+      ? `📨 散文式提示词已收到（${M.S.caption.length} 字）· 目标 ${+wCw.value || 1024}×${+wCh.value || 1024}` + (wAi && wAi.value ? " · ⚡AI 拆解已启用：Queue 一次生成布局画布" : " · 点 ⚡拆解 生成画布")
       : `布局 ${M.S.d.width}×${M.S.d.height} · ${M.S.d.items.length} 项 · 选中 ${M.sel == null ? "—" : M.sel}`;
     if (errs.length) {
       status.className = "mps-status err";
@@ -1386,6 +1471,12 @@ function init(node) {
       sanitizeAgentMd(this);
       rebindWidgets();
       try { warnApiKeyIfSet(node, showKeyWarn); } catch (e) { /* noop */ }
+      // 工作流切换/重新 configure 兜底：清掉可能卡住的提交状态（F2）
+      resetSplitBtn();
+      M.submitting = false;
+      M.posePendingAt = 0;
+      M.splitPendingAt = 0;
+      M.queueSrcSig = "";
       rebuildFromWidgets({ preferEdits: true, write: false });
     },
     onResize: () => {
@@ -1393,6 +1484,8 @@ function init(node) {
     },
     onRemoved: () => {
       clearInterval(M.timer);
+      clearInterval(M.queueTimer);
+      if (M.ro && typeof M.ro.disconnect === "function") M.ro.disconnect();
       clearTimeout(M.wt);
       clearTimeout(M.editsCb);
       clearTimeout(wheelIdle);
@@ -1400,6 +1493,7 @@ function init(node) {
       if (M.apiHooked && M.apiRef && typeof M.apiRef.removeEventListener === "function") {
         M.apiRef.removeEventListener("executed", onApiExecuted);
         M.apiRef.removeEventListener("execution_error", onApiError);
+        M.apiRef.removeEventListener("execution_interrupted", onApiInterrupted);
         M.apiRef.removeEventListener("status", onApiStatus);
       }
     },
@@ -1413,9 +1507,41 @@ function init(node) {
       // ComfyUI 4.9 的 ws 会把长字符串拆成单字符数组传输，归一成字符串
       let md = Array.isArray(data.mps_draft) ? data.mps_draft.join("") : data.mps_draft;
       if (typeof md === "string" && md.trim()) {
-        resetSplitBtn();
-        wEdits.value = md;
-        rebuildFromEdits();
+        // 双通道去重：旧前端 onExecuted 与新前端 api executed 可能各投递一次。
+        // 迟到结果若被第一条路径丢弃，不能在第二条路径又以“无提交记录”被采纳。
+        const now = Date.now();
+        const dupDraft = M.lastDraftText === md && now - (M.lastDraftAt || 0) < 2000;
+        M.lastDraftText = md;
+        M.lastDraftAt = now;
+        if (!dupDraft) {
+          // 结果归属（F3）：后端回传 mps_src_sig 时严格比较（结果自带归属）；
+          // 缺失时回退到内存 pending（旧后端/旧工作流）。
+          const curSig = currentSourceSig();
+          const pendingSig = M.poseBtn ? M.poseSrcSig : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig);
+          const uiSrcSig = Array.isArray(data.mps_src_sig) ? data.mps_src_sig.join("") : data.mps_src_sig;
+          const stale = draftSourceAttribution({
+            uiSig: uiSrcSig, currentSig: curSig, pendingSig,
+          }) === "stale";
+          // 本次结果是否为 📥姿势 注入：必须在 resetSplitBtn 清掉按钮前判断（F5）
+          const isPoseResult = !!M.poseBtn
+            || (!!M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt);
+          resetSplitBtn();
+          if (stale) {
+            M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
+            // 当前 source 的有效画布不能被丢掉：preferEdits=true 先尝试 owner 匹配的 edits；
+            // 只有全部候选解析失败时才按原逻辑清理旧 edits（F8）
+            try { rebuildFromWidgets({ preferEdits: true }); } catch (e) { /* noop */ }
+            rememberRun("⚠ 拆解/注入结果对应旧 source，已丢弃旧画布；请对新 source 重新拆解", "err");
+          } else {
+            // 📥姿势 结果支持 ↶撤销：先记录注入前画布；拆解/换源仍清空 undo（F5）
+            if (isPoseResult && M.S) {
+              try { pushUndo(snapshot()); } catch (e) { /* noop */ }
+            }
+            wEdits.value = md;
+            rebuildFromEdits(curSig, { keepUndo: isPoseResult });
+            try { reportDraftArrived(JSON.parse(md)); } catch (e) { /* 状态提示尽力而为 */ }
+          }
+        }
       }
     }
     const imgs = data.images;
@@ -1433,12 +1559,450 @@ function init(node) {
   }
 
   // ⚡拆解按钮：只提交编辑器单节点（OUTPUT_NODE），结果走事件总线写回
+  // （顺带复位 📥姿势 按钮：两者共用 mps_draft 写回与错误/超时解除路径）
   function resetSplitBtn() {
     if (M.splitBtn) { M.splitBtn.disabled = false; M.splitBtn.textContent = "⚡拆解"; M.splitBtn = null; }
+    if (M.poseBtn) { M.poseBtn.disabled = false; M.poseBtn.textContent = "📥姿势"; M.poseBtn = null; }
+    // 提交已结束（结果到达/失败/超时/队列空）：清掉本次提交的 source 归属记录
+    M.splitSrcSig = "";
+    M.poseSrcSig = "";
+    M.submitting = false;
   }
+
+  // ---------- 姿势库点选面板（v1.7.1） ----------
+  // 数据经 /moss_studio/pose_catalog 代理自已安装的 comfyui-pose-gallery（本插件不
+  // 携带其索引数据）；未安装时给出指引。选中即把图库同格式描述串写入 pose_in(_2)。
+  let poseCatalogCache = null;
+  async function fetchPoseCatalog() {
+    if (poseCatalogCache) return poseCatalogCache;
+    const a = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+    const resp = await a.fetchApi("/moss_studio/pose_catalog");
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.message || ("HTTP " + resp.status));
+    poseCatalogCache = data;
+    return data;
+  }
+
+  function closePosePicker() {
+    const old = root.querySelector(".mps-posepicker");
+    if (old) old.remove();
+  }
+
+  // 断开姿势输入的连线（不同前端 API 兼容）；返回是否已断开。
+  function disconnectPoseInput(name) {
+    const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+    if (idx < 0) return true;
+    const inp = node.inputs[idx];
+    if (!inp || inp.link == null) return true;
+    const lid = inp.link;
+    try {
+      if (typeof node.disconnectInput === "function") {
+        node.disconnectInput(idx);
+      } else {
+        const g = node.graph || app.graph;
+        if (g && typeof g.removeLink === "function") g.removeLink(lid);
+      }
+    } catch (e) { /* 下面统一回退 */ }
+    if (node.inputs[idx] && node.inputs[idx].link != null) {
+      try { node.inputs[idx].link = null; } catch (e) { /* noop */ }
+      const g = node.graph || app.graph;
+      try { if (g && g.links && typeof g.links.delete === "function") g.links.delete(lid); } catch (e) { /* noop */ }
+    }
+    return !(node.inputs[idx] && node.inputs[idx].link != null);
+  }
+
+  // 可写的连线源：PrimitiveString 等常量节点（有字符串 widget）。点选时优先写回
+  // 这类源节点并保留连线；Pose Gallery 等计算输出没有可写 widget，返回 null。
+  function writablePoseSource(name) {
+    const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+    const inp = idx >= 0 ? node.inputs[idx] : null;
+    if (!inp || inp.link == null) return null;
+    const g = node.graph || app.graph;
+    let link = null;
+    try {
+      if (g && g.links) {
+        if (typeof g.links.get === "function") link = g.links.get(inp.link) || g.links.get(String(inp.link));
+        else if (Array.isArray(g.links)) link = g.links.find((l) => l && String(l.id) === String(inp.link));
+        else link = g.links[inp.link];
+      }
+    } catch (e) { /* noop */ }
+    const origin = link && g && typeof g.getNodeById === "function" ? g.getNodeById(link.origin_id) : null;
+    if (!origin || !Array.isArray(origin.widgets)) return null;
+    const outName = origin.outputs && origin.outputs[link.origin_slot] && origin.outputs[link.origin_slot].name;
+    const nodeType = origin.type || (origin.constructor && origin.constructor.comfyClass) || origin.comfyClass || "";
+    for (const nm of [outName, name, "value", "text", "description"]) {
+      if (!nm) continue;
+      const ww = (origin.widgets || []).find((x) => x && x.name === nm && typeof x.value === "string");
+      if (ww && poseSourceWritable({ nodeType, widgetName: ww.name, outName })) {
+        return { node: origin, widget: ww };
+      }
+    }
+    // 不再使用“唯一字符串 widget”兜底：Pose Gallery 的 pose_id 不是可写输出，
+    // 写进去会让上游 VALIDATE_INPUTS 抛“未知姿势 ID”，后续所有提交 400。
+    return null;
+  }
+
+  function openPosePicker(slot) {
+    closePosePicker();
+    const panel = document.createElement("div");
+    panel.className = "mps-posepicker";
+    panel.style.cssText = "border:1px solid #3a5a3a;border-radius:8px;background:#1c221c;margin:4px 0;padding:8px;";
+    const loading = document.createElement("div");
+    loading.style.color = "#9c9";
+    loading.textContent = "⏳ 正在读取姿势库索引…";
+    panel.appendChild(loading);
+    root.insertBefore(panel, runStatus);
+    const setRun = (t, cls) => { runStatus.textContent = t; runStatus.className = "mps-status mps-runstatus " + (cls || ""); };
+    fetchPoseCatalog().then((data) => {
+      buildPosePickerUI(panel, data, slot, (item) => {
+        const name = slot === 1 ? "pose_in" : "pose_in_2";
+        const w = node.widgets.find((x) => x.name === name);
+        if (!w) { setRun("❌ 未找到 pose_in widget", "err"); return; }
+        const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+        const hasLink = idx >= 0 && node.inputs[idx].link != null;
+        const desc = toDescription(item);
+        const src = hasLink ? writablePoseSource(name) : null;
+        const target = poseWriteTarget({ linked: hasLink, sourceWritable: !!src });
+        if (target === "source") {
+          // 连线源是可写的常量节点（如 PrimitiveString）：写源节点、保留连线，
+          // 并把节点标题标成“姿势人物①/②”，让画布上能直接看到当前点选结果。
+          src.widget.value = desc;
+          if (src.widget.inputEl) src.widget.inputEl.value = desc;
+          const label = poseSourceLabel(slot);
+          const oldTitle = String(src.node.title || "").trim();
+          if (!oldTitle || /^(字符串|PrimitiveString)$/i.test(oldTitle) || /^姿势人物/.test(oldTitle)) {
+            src.node.title = label;
+          }
+          try { src.node.setDirtyCanvas(true, true); } catch (e) { /* noop */ }
+          try { (node.graph || app.graph).setDirtyCanvas(true, true); } catch (e) { /* noop */ }
+          // Editor widget 同步一份镜像：以后断开连线仍保留最近点选值
+          w.value = desc;
+          if (w.inputEl) w.inputEl.value = desc;
+          closePosePicker();
+          setRun(`🎯 姿势${slot === 1 ? "①" : "②"}已选择：${item.system}·${item.name}（${item.view}）——已写入 ${label}（连线保留）`, "ok");
+          return;
+        }
+        let disconnected = false;
+        if (target === "prompt-disconnect") {
+          // 连线源不可写（如 Pose Gallery 计算输出）：只能断开后用 widget 值
+          const ok = window.confirm(`${name} 当前有连线，且连线源不是可写的字符串节点。是否断开连线并写入当前点选？`);
+          if (!ok) {
+            setRun(`已取消：${name} 仍有连线，点选值未写入`, "");
+            return;
+          }
+          if (!disconnectPoseInput(name)) {
+            setRun(`❌ 断开 ${name} 连线失败，请手动断开后重试`, "err");
+            return;
+          }
+          disconnected = true;
+        }
+        w.value = desc;
+        if (w.inputEl) w.inputEl.value = w.value;
+        closePosePicker();
+        setRun(`🎯 姿势${slot === 1 ? "①" : "②"}已选择：${item.system}·${item.name}（${item.view}）——已写入 ${name}${disconnected ? "（已断开覆盖用连线）" : ""}`, "ok");
+      });
+    }).catch((e) => {
+      panel.textContent = "";
+      const errEl = document.createElement("div");
+      errEl.style.color = "#ff8b8b";
+      errEl.style.whiteSpace = "pre-wrap";
+      errEl.textContent = "❌ " + (e && e.message ? e.message : e);
+      panel.appendChild(errEl);
+      setRun("❌ 姿势库不可用：" + (e && e.message ? e.message : e), "err");
+    });
+  }
+
+  function buildPosePickerUI(panel, data, slot, onPick) {
+    const items = data.items || [];
+    const apiRef = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+    panel.textContent = "";
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px;";
+    const headInfo = document.createElement("span");
+    headInfo.style.color = "#9c9";
+    headInfo.textContent = `姿势${slot === 1 ? "①" : "②"} · 共 ${items.length} 条 / ${groupByPose(items).length} 组`;
+    head.appendChild(headInfo);
+    const mkSel = (label) => {
+      const s = document.createElement("select");
+      s.style.cssText = "background:#232323;color:#ccc;border:1px solid #3a3a3a;border-radius:4px;padding:2px 4px;max-width:150px;";
+      s.appendChild(new Option(label + "·全部", ""));
+      return s;
+    };
+    const fSys = mkSel("体系"), fCat = mkSel("分类"), fView = mkSel("视角");
+    const facets = buildFacets(items);
+    facets.systems.forEach((v) => fSys.appendChild(new Option(v, v)));
+    facets.categories.forEach((v) => fCat.appendChild(new Option(v, v)));
+    facets.views.forEach((v) => fView.appendChild(new Option(v, v)));
+    const search = document.createElement("input");
+    search.type = "text"; search.placeholder = "搜索：编号/姿势名关键词…";
+    search.style.cssText = "background:#232323;color:#ccc;border:1px solid #3a3a3a;border-radius:4px;padding:2px 6px;width:160px;";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "mps-mini"; closeBtn.textContent = "✕ 关闭";
+    closeBtn.addEventListener("click", closePosePicker);
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "mps-mini"; refreshBtn.textContent = "↻ 刷新索引";
+    refreshBtn.title = "重新读取姿势库索引（安装/更新 pose-gallery 后使用）";
+    refreshBtn.addEventListener("click", () => {
+      poseCatalogCache = null;
+      openPosePicker(slot);
+    });
+    head.append(fSys, fCat, fView, search, refreshBtn, closeBtn);
+    panel.appendChild(head);
+    const list = document.createElement("div");
+    list.style.cssText = "max-height:300px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px;";
+    panel.appendChild(list);
+    const render = () => {
+      const rows = filterPoses(items, { system: fSys.value, category: fCat.value, view: fView.value, query: search.value });
+      const groups = groupByPose(rows);
+      list.textContent = "";
+      if (!groups.length) {
+        const empty = document.createElement("div");
+        empty.style.color = "#888";
+        empty.textContent = "无匹配姿势，调整筛选";
+        list.appendChild(empty);
+        return;
+      }
+      for (const g of groups.slice(0, 120)) {
+        const cell = document.createElement("div");
+        cell.style.cssText = "border:1px solid #333;border-radius:6px;padding:6px;background:#202620;display:flex;gap:6px;";
+        const thumb = document.createElement("img");
+        thumb.loading = "lazy"; thumb.alt = "";
+        thumb.style.cssText = "width:44px;height:58px;object-fit:cover;border-radius:4px;flex:none;background:#2a2a2a;";
+        if (data.has_thumbs) {
+          const first = g.views[0];
+          thumb.src = poseThumbUrl(apiRef, first.id);
+        }
+        const info = document.createElement("div");
+        info.style.cssText = "min-width:0;flex:1;";
+        const nameEl = document.createElement("div");
+        nameEl.style.color = "#ddd";
+        nameEl.style.fontSize = "12px";
+        nameEl.style.overflow = "hidden";
+        nameEl.style.textOverflow = "ellipsis";
+        nameEl.style.whiteSpace = "nowrap";
+        nameEl.title = `${g.system} / ${g.category} / ${g.name}`;
+        nameEl.textContent = g.name;
+        const metaEl = document.createElement("div");
+        metaEl.style.color = "#888";
+        metaEl.style.fontSize = "11px";
+        metaEl.textContent = g.system;
+        metaEl.appendChild(document.createElement("br"));
+        metaEl.appendChild(document.createTextNode(g.category));
+        info.append(nameEl, metaEl);
+        const views = document.createElement("div");
+        views.style.cssText = "display:flex;flex-wrap:wrap;gap:3px;margin-top:3px;";
+        for (const v of g.views) {
+          const b = document.createElement("button");
+          b.className = "mps-mini"; b.textContent = v.view; b.title = toDescription(v);
+          b.style.padding = "1px 5px"; b.style.fontSize = "11px";
+          b.addEventListener("click", (e) => { e.stopPropagation(); onPick(v); });
+          views.appendChild(b);
+        }
+        info.appendChild(views);
+        cell.append(thumb, info);
+        list.appendChild(cell);
+      }
+      if (groups.length > 120) {
+        const more = document.createElement("div");
+        more.style.cssText = "grid-column:1/-1;color:#888;font-size:12px;";
+        more.textContent = `… 仅显示前 120 组（共 ${groups.length} 组），请用筛选/搜索缩小范围`;
+        list.appendChild(more);
+      }
+    };
+    for (const s of [fSys, fCat, fView]) s.addEventListener("change", render);
+    search.addEventListener("input", render);
+    render();
+  }
+
+  // ---------- 运行状态（v1.7.1）：事件 + 轮询 ----------
+  // 语义事件（拆解完成/姿势注入完成/散文已收到）即时更新；3s 轮询 /queue 兜底显示
+  // 本节点排队/执行中（跨客户端触发、事件丢失等场景）。
+  const setRun = (t, cls) => {
+    if (!M.els.runStatus) return;
+    M.els.runStatus.textContent = t;
+    M.els.runStatus.className = "mps-status mps-runstatus " + (cls || "");
+  };
+  M.lastRunMsg = "";      // 最近一次语义事件（轮询空闲时保留显示）
+  M.posePendingAt = 0;    // 📥注入提交时间戳：区分 mps_draft 是拆解还是注入产物
+  M.splitPendingAt = 0;
+  function rememberRun(t, cls) { M.lastRunMsg = t; setRun(t, cls); }
+
+  function reportDraftArrived(draft) {
+    const chars = (draft.items || []).filter((i) => i && i.label === "character");
+    const marked = chars.filter((c) => (c.caption || "").includes(POSE_MARKER));
+    const isInject = M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt;
+    const pair = marked.length && marked.some((c) => (c.caption.split(POSE_MARKER)[1] || "").length > 0) &&
+      chars.length >= 2 && (M.posePairHint || /双人/.test(node.widgets.find((x) => x.name === "pose_in")?.value || ""));
+    if (isInject) {
+      rememberRun(`✅ 姿势注入完成：${marked.length}/${chars.length} 角色已注入${pair ? "（双人姿势整体）" : ""} · 共 ${draft.items.length} 项 · 校验通过`, "ok");
+    } else {
+      rememberRun(`✅ AI 拆解完成：${draft.items.length} 项（角色 ${chars.length}）${marked.length ? ` · 姿势已注入 ${marked.length} 人${chars.length >= 2 ? "（当前双人）" : "（当前单人）"}` : " · 未注入姿势"} · 画布已刷新`, "ok");
+    }
+    M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
+  }
+
+  // /queue 轮询：显示排队/执行中；空闲时保留最近语义消息
+  M.queueTimer = setInterval(async () => {
+    // 节点已删除（onRemoved 之外的兜底）：停止轮询，避免闭包持有已移除节点
+    if (!node.graph) { clearInterval(M.queueTimer); return; }
+    try {
+      const a = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+      if (!a || !a.fetchApi) return;
+      const r = await a.fetchApi("/queue");
+      const q = await r.json();
+      const idStr = String(node.id);
+      // /queue item = [number, prompt_id, prompt, extra, outputs]；prompt 在第 3 项（F4）
+      const inRunning = queueHasNode(q.queue_running, idStr);
+      if (inRunning) { setRun("⏳ 本节点执行中…（LLM 拆解/注入可能需要 10~120 秒）"); return; }
+      const pending = Array.isArray(q.queue_pending) ? q.queue_pending : [];
+      const idx = pending.findIndex((item) => queueHasNode([item], idStr));
+      if (idx >= 0) { setRun(`⏳ 排队中：前面还有 ${idx} 个任务`); return; }
+      if (M.lastRunMsg) setRun(M.lastRunMsg);
+    } catch (e) { /* 轮询失败静默 */ }
+  }, 3000);
+  // 📥姿势按钮：本地注入（不调 LLM）。选中角色→只注入它；未选中→按左右/面积规则
+  // 自动分配。与 ⚡拆解 同一条 ui.mps_draft 写回通道；校验失败会作为节点错误显示。
+  async function applyPose(btn) {
+    const api = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+    if (!api || !api.clientId) { alert("前端尚未就绪，稍后再试"); return; }
+    const fail = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status err"; };
+    if (M.submitting) {
+      fail("已有拆解/注入任务在飞，请等待完成");
+      return;
+    }
+    if (!M.S || M.S.kind !== "layout") {
+      fail("画布还没有拆解完成的布局：先 ⚡拆解（或贴入 layout 草稿）再注入姿势");
+      return;
+    }
+    const linked = (name) => {
+      const inp = (node.inputs || []).find((x) => x && x.name === name);
+      return !!inp && inp.link != null;
+    };
+    const wPoseIn = node.widgets.find((x) => x.name === "pose_in");
+    const wPoseIn2 = node.widgets.find((x) => x.name === "pose_in_2");
+    // 姿势三入口：连线 > 手填/点选 widget；两者都空才拒绝（v1.7.1 起 pose_in 是 widget）
+    const srcA = resolvePoseSource({ linked: linked("pose_in"), widgetValue: wPoseIn && wPoseIn.value });
+    const srcB = resolvePoseSource({ linked: linked("pose_in_2"), widgetValue: wPoseIn2 && wPoseIn2.value });
+    if (srcA === "none" && srcB === "none") {
+      fail("没有可用的姿势来源：点 🎯姿势①/② 选择、在 pose_in/pose_in_2 手填，或连接姿势来源（连线值优先）");
+      return;
+    }
+    const wMode = node.widgets.find((x) => x.name === "pose_mode");
+    if (wMode && wMode.value === "关闭") {
+      fail("pose_mode=关闭：请先切回 自动 / 强制双人 再注入");
+      return;
+    }
+    const items = (M.S.d && M.S.d.items) || [];
+    let sel = -1;
+    if (M.sel != null && items[M.sel] && items[M.sel].label === "character") sel = M.sel;
+    M.submitting = true;
+    btn.disabled = true;
+    btn.textContent = "⏳注入中…";
+    M.poseBtn = btn;
+    M.splitAt = Date.now(); // 复用空队列监视器的防卡死计时
+    M.posePendingAt = Date.now(); // 运行状态：区分 mps_draft 是注入产物
+    M.splitPendingAt = 0;
+    M.posePairHint = /双人/.test(String((node.widgets.find((x) => x.name === "pose_in") || {}).value || ""));
+    // 记录本次注入提交对应的 source：结果回来时若 source 已变则丢弃旧结果（P0-1）
+    M.poseSrcSig = currentSourceSig();
+    M.splitSrcSig = "";
+    M.els.status.textContent = "⏳ 姿势注入中…（本地写入不调 LLM；"
+      + (sel >= 0 ? "注入到选中角色" : "按左右/面积规则自动分配") + "）";
+    M.els.status.className = "mps-status";
+    try {
+      if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      writeEdits(); // 冲洗画布最新内容到 edits widget，提交的就是眼前这份
+      const full = await app.graphToPrompt();
+      const all = (full && (full.output || full)) || {};
+      const wAi = node.widgets.find((x) => x.name === "ai_draft");
+      const inputs = buildSplitPayload(all, node.id, {
+        edits: wEdits.value,           // 注入必须保留画布内容（拆解默认是清空重拆）
+        ai_draft: !!(wAi && wAi.value),
+        force_split: false,
+        apply_pose: sel >= 0 ? sel : -2, // -2=自动分配（后端约定），>=0=选中角色下标
+      });
+      if (!inputs) throw new Error("编辑器被旁路或未注册（检查 Ctrl+B / 节点状态）");
+      const r = await api.fetchApi("/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: inputs, client_id: api.clientId }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
+      }
+      const j = await r.json().catch(() => ({}));
+      M.lastSubmitId = (j && j.prompt_id) || "";
+      const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
+      console.info("[MPS] submit", {
+        kind: "pose",
+        prompt_id: M.lastSubmitId,
+        srcSig: M.poseSrcSig,
+        editsLen: (submitted.edits || "").length,
+        editsHash: textHash(submitted.edits || ""),
+        pose_in: submitted.pose_in,
+        pose_in_2: submitted.pose_in_2,
+        pose_mode: submitted.pose_mode,
+      });
+    } catch (e) {
+      resetSplitBtn();
+      fail("姿势注入提交失败: " + e.message);
+    }
+  }
+  // 连线源的值（尽力解析）：用于判断 ⚡拆解 时 widget 里点选/手填的值是否真的被连线覆盖。
+  function linkSourceValue(name) {
+    const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+    const inp = idx >= 0 ? node.inputs[idx] : null;
+    if (!inp || inp.link == null) return null;
+    const g = node.graph || app.graph;
+    let link = null;
+    try {
+      if (g && g.links) {
+        if (typeof g.links.get === "function") link = g.links.get(inp.link) || g.links.get(String(inp.link));
+        else if (Array.isArray(g.links)) link = g.links.find((l) => l && String(l.id) === String(inp.link));
+        else link = g.links[inp.link];
+      }
+    } catch (e) { /* noop */ }
+    const origin = link && g && typeof g.getNodeById === "function" ? g.getNodeById(link.origin_id) : null;
+    if (!origin) return null;
+    const outName = origin.outputs && origin.outputs[link.origin_slot] && origin.outputs[link.origin_slot].name;
+    for (const nm of [outName, name, "value", "text", "description"]) {
+      if (!nm) continue;
+      const ww = (origin.widgets || []).find((x) => x && x.name === nm && typeof x.value === "string");
+      if (ww) return ww.value;
+    }
+    const strings = (origin.widgets || []).filter((x) => x && typeof x.value === "string" && x.value.trim());
+    return strings.length === 1 ? strings[0].value : null;
+  }
+
+  // 「有连线 + widget 非空且值不同」→ 返回一次提示文本（ComfyUI 提交以连线值为准）。
+  function poseLinkOverrideWarning() {
+    if (M.poseLinkWarned) return "";
+    const hit = [];
+    for (const name of ["pose_in", "pose_in_2"]) {
+      const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+      const inp = idx >= 0 ? node.inputs[idx] : null;
+      if (!inp || inp.link == null) continue;
+      const ww = node.widgets.find((x) => x && x.name === name);
+      const wv = ww && String(ww.value || "").trim();
+      if (!wv) continue;
+      const lv = linkSourceValue(name);
+      if (lv != null && lv.trim() === wv) continue;
+      hit.push(name);
+    }
+    if (!hit.length) return "";
+    M.poseLinkWarned = true;
+    return `⚠ ${hit.join(" / ")} 已连线：本次 ⚡拆解 以连线值为准（widget 里的点选/手填值不会生效）`;
+  }
+
   async function runAiSplit(btn) {
     const api = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
     if (!api || !api.clientId) { alert("前端尚未就绪，稍后再试"); return; }
+    if (M.submitting) {
+      M.els.status.textContent = "已有拆解/注入任务在飞，请等待完成";
+      M.els.status.className = "mps-status err";
+      return;
+    }
     // 判断"要不要拆解"以 source 为准（用户改了散文就要能重新拆解），
     // edits 只是上一次的结果写回，不能因为它含 items 就拦截新散文的拆解。
     const src = (wSource.value || "").trim();
@@ -1458,30 +2022,50 @@ function init(node) {
     }
     btn.disabled = true;
     btn.textContent = "⏳拆解中…";
+    M.submitting = true;
     M.splitBtn = btn;
     M.splitAt = Date.now();
-    M.els.status.textContent = "⏳ AI 拆解中…（LLM 生成布局草稿，通常 10~120 秒，完成后画布自动刷新）";
+    M.splitPendingAt = Date.now(); // 运行状态：本次 mps_draft 是拆解产物
+    M.posePendingAt = 0;
+    // 记录本次拆解提交对应的 source：LLM 执行期间用户改 source 时，旧结果晚到
+    // 会被丢弃，避免旧画布被盖上当前 source 的签名（P0-1）
+    M.splitSrcSig = currentSourceSig();
+    M.poseSrcSig = "";
+    const linkWarn = poseLinkOverrideWarning();
+    M.els.status.textContent = "⏳ AI 拆解中…（LLM 生成布局草稿，通常 10~120 秒，完成后画布自动刷新）"
+      + (linkWarn ? "\n" + linkWarn : "");
     M.els.status.className = "mps-status";
-    const inputs = {};
-    for (const nm of ["source", "canvas_width", "canvas_height", "edits", "provider", "base_url", "model", "api_key", "temperature", "thinking", "timeout", "ai_prompt", "agent_md"]) {
-      const w = node.widgets.find(x => x.name === nm);
-      if (w) inputs[nm] = w.value;
-    }
-    inputs.ai_draft = true; // 按钮语义就是拆解
-    inputs.force_split = true; // 强制重拆：绕过“同输入缓存”，普通 Queue 不会设置
-    // 关键：必须清空 edits 再提交。后端 edits 非空且对应当前 source 时优先，
-    // 带着上一次的旧草稿提交，服务端只会透传旧布局、不触发 AI 拆解。
-    inputs.edits = "";
     try {
+      // 以整个工作流当前状态取数，再裁剪出编辑器及其上游子图：
+      // pose_in / pose_in_2 / underlay 等链接输入的上游（如 Pose Gallery）必须
+      // 一并提交，否则拆解 LLM 收不到姿势描述。
+      if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      const full = await app.graphToPrompt();
+      const all = (full && (full.output || full)) || {};
+      const inputs = buildSplitPayload(all, node.id);
+      if (!inputs) throw new Error("编辑器被旁路或未注册，无法单独拆解（检查 Ctrl+B / 节点状态）");
       const r = await api.fetchApi("/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: { [String(node.id)]: { class_type: "MOSSEditor", inputs } }, client_id: api.clientId }),
+        body: JSON.stringify({ prompt: inputs, client_id: api.clientId }),
       });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
         throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
       }
+      const j = await r.json().catch(() => ({}));
+      M.lastSubmitId = (j && j.prompt_id) || "";
+      const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
+      console.info("[MPS] submit", {
+        kind: "split",
+        prompt_id: M.lastSubmitId,
+        srcSig: M.splitSrcSig,
+        editsLen: (submitted.edits || "").length,
+        editsHash: textHash(submitted.edits || ""),
+        pose_in: submitted.pose_in,
+        pose_in_2: submitted.pose_in_2,
+        pose_mode: submitted.pose_mode,
+      });
     } catch (e) {
       resetSplitBtn();
       M.els.status.textContent = "拆解提交失败: " + e.message;
@@ -1498,23 +2082,38 @@ function init(node) {
       M.builtSig = M.pendSig = currentSig();
       M.els.status.textContent = "拆解失败: " + (d.exception_message || "未知错误");
       M.els.status.className = "mps-status err";
+      rememberRun("❌ 本节点执行失败：" + (d.exception_message || "未知错误"), "err");
+      M.posePendingAt = 0; M.splitPendingAt = 0;
     } catch (e) { /* noop */ }
   };
 
   // 队列跑完却没等到本节点的 executed（结果被缓存跳过 / 事件丢失）→ 解除按钮卡死
   const onApiStatus = (ev) => {
     try {
-      if (!M.splitBtn) return;
+      if (!M.splitBtn && !M.poseBtn) return;
       const st = ev && ev.detail;
-      // 兼容两种事件负载：{exec_info:{queue_remaining}} 与 {status:{exec_info:{...}}}
-      const q = st && ((st.exec_info && st.exec_info.queue_remaining)
-        || (st.status && st.status.exec_info && st.status.exec_info.queue_remaining));
-      if (q === 0 && Date.now() - (M.splitAt || 0) > 4000) {
+      const hasPending = !!(M.splitBtn || M.poseBtn);
+      const elapsedMs = Date.now() - (M.splitAt || 0);
+      // 显式解析两种 status 负载；queue_remaining=0 必须命中（F2）
+      if (shouldResetOnQueueIdle({ queueRemaining: queueRemaining(st), hasPending, elapsedMs })) {
         resetSplitBtn();
         M.builtSig = M.pendSig = currentSig();
-        M.els.status.textContent = "队列已空但未收到拆解结果（可能被缓存跳过）：请再点一次 ⚡拆解";
+        M.els.status.textContent = "队列已空但未收到结果（可能被缓存跳过）：请再点一次";
         M.els.status.className = "mps-status err";
       }
+    } catch (e) { /* noop */ }
+  };
+
+  // 执行被用户/系统中断：复位按钮与 M.submitting，避免永久否决 Queue（F2）
+  const onApiInterrupted = () => {
+    try {
+      if (!M.splitBtn && !M.poseBtn && !M.submitting) return;
+      resetSplitBtn();
+      M.builtSig = M.pendSig = currentSig();
+      M.els.status.textContent = "执行被中断：已复位拆解/注入按钮，可重新提交";
+      M.els.status.className = "mps-status err";
+      M.posePendingAt = 0;
+      M.splitPendingAt = 0;
     } catch (e) { /* noop */ }
   };
 
@@ -1531,11 +2130,15 @@ function init(node) {
       const d = ev && ev.detail;
       if (!d) return;
       if (String(d.node) !== String(node.id) && String(d.display_node) !== String(node.id)) return;
+      // F3：只做对照日志，不改行为（全流程 Queue 的 prompt_id 与最近一次拆解不同属正常）
+      if (d.prompt_id && M.lastSubmitId && String(d.prompt_id) !== String(M.lastSubmitId)) {
+        console.debug("[MPS] executed prompt_id mismatch", { prompt_id: d.prompt_id, lastSubmitId: M.lastSubmitId });
+      }
       const out = d.output && (d.output.ui || d.output);
       // 本节点执行完却没带回新草稿（例如 edits 透传 / 输入没变被缓存）：
-      // 解除"⏳拆解中"，别让按钮挂着等一个不会来的结果。
+      // 解除"⏳拆解中/⏳注入中"，别让按钮挂着等一个不会来的结果。
       const ui = out || {};
-      if (M.splitBtn && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
+      if ((M.splitBtn || M.poseBtn) && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
         resetSplitBtn();
         M.els.status.textContent = "本次执行没有产生新草稿（源可能没变化被缓存）。改一下 source 再试，或点 ⟲重置";
         M.els.status.className = "mps-status err";
@@ -1556,6 +2159,7 @@ function init(node) {
     if (api) {
       api.addEventListener("executed", onApiExecuted);
       api.addEventListener("execution_error", onApiError);
+      api.addEventListener("execution_interrupted", onApiInterrupted);
       api.addEventListener("status", onApiStatus);
       M.apiHooked = true;
       M.apiRef = api;
@@ -1580,11 +2184,12 @@ function init(node) {
     } else {
       M.pendSig = sig;
     }
-    // 拆解按钮卡死硬兜底：180s 仍无结果就解除，避免永远停在"⏳拆解中…"
-    if (M.splitBtn && Date.now() - (M.splitAt || 0) > 180000) {
+    // 拆解/注入按钮卡死硬兜底：180s 仍无结果就解除（applyPose 共用 M.splitAt）
+    const hasPending = !!(M.splitBtn || M.poseBtn);
+    if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0) })) {
       resetSplitBtn();
       M.builtSig = M.pendSig = currentSig();
-      M.els.status.textContent = "拆解超时（180s 无结果）：请检查 LLM 配置后重试 ⚡拆解";
+      M.els.status.textContent = "拆解/注入超时（180s 无结果）：已复位，请检查 LLM 配置后重试";
       M.els.status.className = "mps-status err";
     }
   }, 700);

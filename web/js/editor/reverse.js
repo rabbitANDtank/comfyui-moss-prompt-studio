@@ -59,27 +59,45 @@ function recordDraftHash(record) {
 /**
  * 反推写回决策：
  * - "apply"  写入
- * - "same"   同一结果、内容未变：重复事件去重
+ * - "same"   同一结果（同图同参）：跳过写回
  * - "edited" 画布已有手改/内容，且 replace_edits=false：保留并提示
  *
  * 规则收紧点：
  * 1. 首次接反推（record 为空）且画布已有内容、replace_edits=false → "edited"，
- *    不再直接覆盖手改。
- * 2. same-sig 不再永久阻止：replace_edits=true 允许重放；画布被清空也允许恢复。
+ *   不再直接覆盖手改。
+ * 2. same-sig（同图同参重跑）不再覆盖：真机实测踩坑——完整 Queue 会重跑 enabled
+ *   的反推，若 prose/draft 重放写回 source，刚拆解好的画布会因签名失配立即回退
+ *   caption（"画布只剩文字"）。只有目标为空时才允许恢复写入（清空后重放找回）。
  * 3. 只记录 draftHash，不在工作流里重复保存整份画布文本。
  */
-export function reverseDecision(record, { ownerId, sig, mode, replaceEdits, edits }) {
+export function reverseDecision(record, { ownerId, sig, mode, replaceEdits, edits, source }) {
   if (!sig) return "apply";
   const sameOwner = !!record && String(record.owner) === String(ownerId);
   const recHash = recordDraftHash(record);
   const curText = norm(edits);
   const curHash = curText ? textHash(curText) : "";
   const sameSig = sameOwner && record.sig === sig;
+  // prose/draft 实际写 source；旧调用方可能只传 edits（source undefined），
+  // 此时不能把“未提供 source”当成“source 已清空”，保持旧行为。
+  const hasSourceArg = source !== undefined;
+  const srcEmpty = hasSourceArg && !norm(source);
 
   if (sameSig) {
-    if (replaceEdits) return "apply";     // 显式允许覆盖时，重放同一结果
-    if (!curHash) return "apply";         // 画布被清空：恢复同一结果
-    return curHash === recHash ? "same" : "edited";
+    if (mode === "prose") {
+      // 目标 source 被清空才允许同结果重放恢复；否则不覆盖已有 source/拆解成果。
+      if (hasSourceArg) return srcEmpty ? "apply" : "same";
+      return curHash ? "same" : "apply";
+    }
+    if (mode === "draft") {
+      // 目标 source；画布可能承载拆解/手改结果。同图同参重放不得覆盖：
+      // 只有 source 与画布都为空才恢复，画布已手改时明确跳过。
+      if (curHash && curHash !== recHash) return "same";
+      return (srcEmpty && !curHash) ? "apply" : "same";
+    }
+    // canvas：目标就是 edits，保持原有保护逻辑
+    if (!curHash) return "apply";         // 画布/结果被清空：允许重放恢复
+    if (curHash === recHash) return "same";
+    return replaceEdits ? "apply" : "edited";
   }
 
   if (mode === "canvas" && !replaceEdits) {

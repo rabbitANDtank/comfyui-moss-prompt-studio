@@ -107,3 +107,59 @@ test("mountCompilerSync follows draft upstream, auto-wires and syncs size", () =
   assert.deepEqual(compiler.widgets.map((w) => w.value), [928, 1648]);
   handle.dispose();
 });
+
+// ---------- F3：flush 否决 / Queue 互斥 ----------
+
+test("flushAll reports veto and wrapped queuePrompt is not called", () => {
+  const reg = createEditorFlushRegistry();
+  const calls = [];
+  reg.register(() => { calls.push("flush-a"); });
+  reg.register(() => { calls.push("flush-b"); return false; });
+  const app = { queuePrompt: () => { calls.push("orig"); return "orig-result"; } };
+  reg.install(app);
+
+  const ret = app.queuePrompt(0, 1);
+  assert.equal(ret, false, "被否决时返回 false");
+  assert.deepEqual(calls, ["flush-a", "flush-b"], "原始 queuePrompt 不得被调用");
+  assert.equal(reg.flushAll(), false, "flushAll 直接调用也返回 false");
+});
+
+test("flushAll returns true and passes through without veto", () => {
+  const reg = createEditorFlushRegistry();
+  const calls = [];
+  reg.register(() => { calls.push("flush"); });           // undefined = 不否决
+  reg.register(() => true);                               // true = 不否决
+  const app = { queuePrompt: () => { calls.push("orig"); return "ok"; } };
+  reg.install(app);
+
+  assert.equal(reg.flushAll(), true);
+  calls.length = 0;
+  assert.equal(app.queuePrompt(), "ok");
+  assert.deepEqual(calls, ["flush", "orig"]);
+});
+
+test("Ctrl+Enter veto prevents default and stops the native shortcut", () => {
+  const listeners = [];
+  const prevDoc = globalThis.document;
+  globalThis.document = { addEventListener: (type, fn) => listeners.push({ type, fn }) };
+  try {
+    const reg = createEditorFlushRegistry();
+    const calls = [];
+    reg.register(() => { calls.push("flush"); return false; });
+    const app = { queuePrompt: () => calls.push("orig") };
+    reg.install(app);
+    const kd = listeners.find((l) => l.type === "keydown");
+    assert.ok(kd, "keydown 监听已安装");
+    const ev = {
+      ctrlKey: true, key: "Enter", prevented: false, stopped: false,
+      preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; },
+    };
+    kd.fn(ev);
+    assert.equal(ev.prevented, true);
+    assert.equal(ev.stopped, true);
+    assert.deepEqual(calls, ["flush"], "否决时不应触发原始 queuePrompt");
+  } finally {
+    if (prevDoc === undefined) delete globalThis.document;
+    else globalThis.document = prevDoc;
+  }
+});

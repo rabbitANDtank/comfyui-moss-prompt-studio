@@ -19,11 +19,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from py.translate import (  # noqa: E402
     DEFAULT_AI_DRAFT_PROMPT,
+    POSE_MARKER,
     _forgive_llm_sloppiness,
     _llm_opener,
     build_body,
     extract_json,
     load_config,
+    pose_directive_block,
     resolve_endpoint,
 )
 from py.compile_prompt import validate_draft  # noqa: E402
@@ -116,6 +118,38 @@ VARIANTS = {
     "combined": {"prompt": COMBINED_PROMPT, "norm": True, "json": True, "temp": 0.1, "max_tokens": 4096},
 }
 
+# 姿势注入变体（v1.7.0）：验证 pose_directive_block 在真实 LLM 上的合规率。
+# 姿势描述取自 comfyui-pose-gallery 的 description 输出格式（体系/分类/姿势名称/视角）。
+PROSE_SOLO = (
+    "日系写真的室内场景，3:4 竖构图。一位二十五岁的成年女性站在落地窗前，"
+    "穿米白色针织长裙，长发披肩，气质安静；午后阳光透过纱帘洒在木地板上，"
+    "整体色调温暖，画面无文字、无水印。"
+)
+PROSE_PAIR = (
+    "都市情感剧的 rooftop 场景，16:9 横构图。左侧一位二十八岁的成年男性穿深灰西装，"
+    "右侧一位二十六岁的成年女性穿酒红色连衣裙，两人有互动；背景是黄昏的城市天际线，"
+    "暖金色主光，电影感，画面无文字、无水印。"
+)
+POSE_A_DESC = "全身单人・标准系 / 跪立 / 四肢着地・单腿后高抬 / 俯视"
+POSE_B_DESC = "全身单人・标准系 / 站姿 / S形站姿・胯部侧顶 / 正面"
+POSE_PAIR_DESC = "双人缠绵 / 立位贴身 / 面对面・抱起单膝 / 正面"
+
+
+def _pose_prompt(pose_a: str, pose_b: str = "", mode: str = "自动") -> str:
+    block = pose_directive_block(pose_a, pose_b, mode)
+    assert block, "姿势指令段为空：检查输入与 mode"
+    return f"{DEFAULT_AI_DRAFT_PROMPT}\n\n{block}"
+
+
+VARIANTS.update({
+    "pose_solo": {"prompt": _pose_prompt(POSE_A_DESC), "norm": False, "json": False,
+                  "temp": 0.3, "max_tokens": 16384, "prose": PROSE_SOLO},
+    "pose_dual": {"prompt": _pose_prompt(POSE_A_DESC, POSE_B_DESC), "norm": False, "json": False,
+                  "temp": 0.3, "max_tokens": 16384, "prose": PROSE_PAIR},
+    "pose_pair": {"prompt": _pose_prompt(POSE_PAIR_DESC), "norm": False, "json": False,
+                  "temp": 0.3, "max_tokens": 16384, "prose": PROSE_PAIR},
+})
+
 
 def post_chat(url: str, key: str, body: dict, timeout: int):
     """和 py.translate.chat 同口径，但额外返回 usage 与 finish_reason。"""
@@ -173,7 +207,8 @@ def norm_to_abs(draft: dict, w: int, h: int) -> dict:
 def run_one(name: str, cfg: dict, url: str, model: str, key: str, rep: int, timeout: int,
             provider: str = "deepseek", thinking: str = "off") -> dict:
     v = VARIANTS[name]
-    user = f"Canvas size: {W} x {H}\n\nProse prompt:\n{PROSE}"
+    prose = v.get("prose", PROSE)
+    user = f"Canvas size: {W} x {H}\n\nProse prompt:\n{prose}"
     messages = [
         {"role": "system", "content": v["prompt"]},
         {"role": "user", "content": user},
@@ -211,6 +246,10 @@ def run_one(name: str, cfg: dict, url: str, model: str, key: str, rep: int, time
                 "avg_caption_len": round(sum(len(c) for c in caps) / len(caps), 1) if caps else 0,
                 "palette": bool((out.get("summary") or {}).get("palette")),
                 "meta": bool((out.get("summary") or {}).get("meta")),
+                # 姿势注入合规：带 ；姿势： 标记的角色条目数（非姿势变体应为 0）
+                "pose_marked": sum(1 for it in items
+                                   if it.get("label") == "character"
+                                   and POSE_MARKER in str(it.get("caption") or "")),
             })
             break
         except Exception as e:  # noqa: BLE001

@@ -25,11 +25,21 @@ test("pickReverseForm maps slots; canvas falls back to draft", () => {
   assert.equal(pickReverseForm(null, 0), null);
 });
 
-test("same-sig: replace on allows replay; replace off dedupes only unchanged canvas", () => {
+test("same-sig: replay dedupes unchanged; protects split canvas; recovers only when empty", () => {
   const rec = { owner: 7, sig: "a", mode: "canvas", draftHash: textHash("A") };
+  // 真机踩坑回归：完整 Queue 重跑同图同参反推，prose 重放不得覆盖已有拆解画布
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "prose", replaceEdits: true, edits: "split-canvas",
+  }), "same", "same-sig 的 prose 重放必须跳过：拆解成果在它之上，写回会让画布失配回退");
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "prose", replaceEdits: true, edits: "",
+  }), "apply", "画布/结果被清空时允许重放恢复");
   assert.equal(reverseDecision(rec, {
     ownerId: 7, sig: "a", mode: "canvas", replaceEdits: true, edits: "A",
-  }), "apply", "replace_edits=true 必须允许重放同一结果");
+  }), "same", "内容未变的重放直接去重（不再无意义写回）");
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "canvas", replaceEdits: true, edits: "B",
+  }), "apply", "显式 replace_edits=true 且画布已变化：允许覆盖");
   assert.equal(reverseDecision(rec, {
     ownerId: 7, sig: "a", mode: "canvas", replaceEdits: false, edits: "A",
   }), "same", "重复事件且内容未变：去重");
@@ -93,4 +103,35 @@ test("collectPromptSubset keeps the root and its upstream only", () => {
   assert.deepEqual(Object.keys(collectPromptSubset(prompt, 2)).sort(), ["1", "2"]);
   assert.deepEqual(Object.keys(collectPromptSubset(prompt, "3")).sort(), ["1", "2", "3"]);
   assert.deepEqual(collectPromptSubset(prompt, 99), {});
+});
+
+// ---------- F7 same-sig 保护按写入目标判定 ----------
+
+test("prose same-sig: restore only when target source is empty", () => {
+  const rec = parseReverseRecord(reverseRecord(7, "a", "prose", "source-A"));
+  // 目标 source 被清空：允许同结果重放恢复
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "prose", replaceEdits: true, source: "", edits: "caption-json",
+  }), "apply");
+  // source 仍有内容：不覆盖
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "prose", replaceEdits: true, source: "source-A", edits: "caption-json",
+  }), "same");
+  // 旧调用方未传 source：保持旧行为（edits 有内容 → same）
+  assert.equal(reverseDecision(rec, {
+    ownerId: 7, sig: "a", mode: "prose", replaceEdits: true, edits: "caption-json",
+  }), "same");
+});
+
+test("draft same-sig: never overwrite hand-edited canvas; restore only both empty", () => {
+  const rec = parseReverseRecord(reverseRecord(7, "a", "draft", "DRAFT-A"));
+  const base = { ownerId: 7, sig: "a", mode: "draft", replaceEdits: true };
+  // 画布已手改（hash != record hash）→ 同图同参重放不得覆盖
+  assert.equal(reverseDecision(rec, { ...base, source: "source-A", edits: "HAND" }), "same");
+  // source 非空 → 不覆盖
+  assert.equal(reverseDecision(rec, { ...base, source: "source-A", edits: "" }), "same");
+  // source 空但画布仍是旧 draft（未手改）→ 按“source 与画布都空”规则不恢复
+  assert.equal(reverseDecision(rec, { ...base, source: "", edits: "DRAFT-A" }), "same");
+  // source 空 + 画布空 → 恢复
+  assert.equal(reverseDecision(rec, { ...base, source: "", edits: "" }), "apply");
 });

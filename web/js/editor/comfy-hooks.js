@@ -11,9 +11,14 @@ export function createEditorFlushRegistry() {
   let shortcutInstalled = false;
 
   const flushAll = () => {
+    let ok = true;
     for (const fn of subs) {
-      try { fn(); } catch (e) { /* noop */ }
+      try {
+        // 订阅者可返回 false 否决本次提交（如：拆解/注入任务在飞时拒绝 Queue）
+        if (fn() === false) ok = false;
+      } catch (e) { /* noop */ }
     }
+    return ok;
   };
 
   const register = (fn) => {
@@ -29,14 +34,21 @@ export function createEditorFlushRegistry() {
     if (app && typeof app.queuePrompt === "function" && app.queuePrompt !== wrappedQueue) {
       const orig = app.queuePrompt;
       wrappedQueue = function (...args) {
-        flushAll();
+        // 任一订阅者否决（返回 false）时不调用原始 queuePrompt
+        if (flushAll() === false) return false;
         return orig.apply(this, args);
       };
       app.queuePrompt = wrappedQueue;
     }
     if (!shortcutInstalled && typeof document !== "undefined" && document.addEventListener) {
       document.addEventListener("keydown", (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") flushAll();
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          // Ctrl+Enter 同样遵守否决：阻止 ComfyUI 自己的快捷键继续排队
+          if (flushAll() === false) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }
       }, true);
       shortcutInstalled = true;
     }

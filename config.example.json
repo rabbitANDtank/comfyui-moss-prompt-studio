@@ -1,18 +1,20 @@
 {
+  "_comment": "probe_allow_private 默认 false：即使请求来自 ComfyUI 同源页面，连接测试也不允许访问 localhost/内网地址（防第三方前端脚本把路由当内网探测代理）。需要测试本地 Ollama / LM Studio 时改为 true。",
+  "probe_allow_private": false,
   "mimo": {
     "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
     "model": "mimo-v2.6-flash",
-    "api_key": "tp-put-your-mimo-token-plan-key-here"
+    "api_key": "PUT_YOUR_MIMO_TOKEN_PLAN_KEY_HERE"
   },
   "deepseek": {
     "base_url": "https://api.deepseek.com/v1",
     "model": "deepseek-flash",
-    "api_key": "sk-put-your-deepseek-key-here"
+    "api_key": "PUT_YOUR_DEEPSEEK_KEY_HERE"
   },
   "minimax": {
     "base_url": "https://api.minimax.cn/v1",
     "model": "MiniMax-M3.1-Flash",
-    "api_key": "sk-put-your-minimax-key-here"
+    "api_key": "PUT_YOUR_MINIMAX_KEY_HERE"
   },
   "custom": {}
 }

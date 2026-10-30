@@ -18,7 +18,7 @@ const FULL = {
   provider: "mimo",
   base_url: "https://mimo.example/v1",
   model: "mimo-v2.6-flash",
-  api_key: "sk-test",
+  api_key: "test-key",
   temperature: 0.3,
   thinking: "off",
   timeout: 180,
@@ -73,16 +73,16 @@ test("syncLlmConfig copies connection fields but never api_key", () => {
     assert.equal(target.widgets.find((w) => w.name === "provider").value, "mimo");
     assert.equal(target.widgets.find((w) => w.name === "model").value, "mimo-v2.6-flash");
     // key 不随 ⇄同步 复制：目标保留自己的值
-    assert.equal(target.widgets.find((w) => w.name === "api_key").value, "sk-test");
+    assert.equal(target.widgets.find((w) => w.name === "api_key").value, "test-key");
   }
   assert.equal(sampler.widgets[0].value, 25);
 });
 
 test("applyLlmConfig honours an explicit key list (sync path excludes api_key)", () => {
   const node = mkNode("MOSSTranslator", FULL);
-  const n = applyLlmConfig(node, { ...FULL, api_key: "sk-should-not-apply" }, SYNC_LLM_KEYS);
+  const n = applyLlmConfig(node, { ...FULL, api_key: "test-key-should-not-apply" }, SYNC_LLM_KEYS);
   assert.equal(n, 6, "只应用 6 个非 key 字段");
-  assert.equal(node.widgets.find((w) => w.name === "api_key").value, "sk-test", "key 保持原值");
+  assert.equal(node.widgets.find((w) => w.name === "api_key").value, "test-key", "key 保持原值");
   // 目标缺少的字段自动跳过
   const sparse = mkNode("MOSSTranslator", { provider: "mimo", api_key: "EMPTY" });
   assert.equal(applyLlmConfig(sparse, FULL, SYNC_LLM_KEYS), 1);
@@ -90,8 +90,8 @@ test("applyLlmConfig honours an explicit key list (sync path excludes api_key)",
 });
 
 test("apiKeyNeedsWarning flags non-empty non-EMPTY keys", () => {
-  assert.equal(apiKeyNeedsWarning("sk-secret"), true);
-  assert.equal(apiKeyNeedsWarning("  sk-secret  "), true);
+  assert.equal(apiKeyNeedsWarning("test-key"), true);
+  assert.equal(apiKeyNeedsWarning("  test-key  "), true);
   assert.equal(apiKeyNeedsWarning("EMPTY"), false);
   assert.equal(apiKeyNeedsWarning(""), false);
   assert.equal(apiKeyNeedsWarning("   "), false);
@@ -100,15 +100,15 @@ test("apiKeyNeedsWarning flags non-empty non-EMPTY keys", () => {
 
 test("warnApiKeyIfSet warns once per key and re-arms on change", () => {
   const seen = [];
-  const node = mkNode("MOSSEditor", { api_key: "sk-one" });
+  const node = mkNode("MOSSEditor", { api_key: "test-key-one" });
   assert.equal(warnApiKeyIfSet(node, (t) => seen.push(t)), true);
   assert.deepEqual(seen, [API_KEY_WARNING_TEXT]);
   assert.equal(warnApiKeyIfSet(node, (t) => seen.push(t)), false, "同一个 key 不重复提示");
   node.widgets.find((w) => w.name === "api_key").value = "EMPTY";
   assert.equal(warnApiKeyIfSet(node, (t) => seen.push(t)), false, "EMPTY 不提示");
-  node.widgets.find((w) => w.name === "api_key").value = "sk-two";
+  node.widgets.find((w) => w.name === "api_key").value = "test-key-two";
   assert.equal(warnApiKeyIfSet(node, (t) => seen.push(t)), true, "换了新 key 重新提示");
   assert.equal(seen.length, 2);
   // 无 show 回调时走 console.warn，不抛错
-  assert.equal(warnApiKeyIfSet(mkNode("MOSSTranslator", { api_key: "sk-x" })), true);
+  assert.equal(warnApiKeyIfSet(mkNode("MOSSTranslator", { api_key: "test-key-x" })), true);
 });

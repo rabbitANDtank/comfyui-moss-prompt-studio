@@ -339,9 +339,16 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
     queue = []
     hits = 0
     status = 200
+    requests = []  # 收到的请求体（姿势注入等需要断言 system prompt 的用例）
 
     def do_POST(self):
         type(self).hits += 1
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            type(self).requests.append(json.loads(raw.decode("utf-8")))
+        except Exception:
+            type(self).requests.append(None)
         content = type(self).queue.pop(0) if type(self).queue else "garbage not json"
         body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
         self.send_response(type(self).status)
@@ -358,6 +365,7 @@ def _start_mock():
     MockHandler.queue = []
     MockHandler.hits = 0
     MockHandler.status = 200
+    MockHandler.requests = []
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -781,6 +789,378 @@ def test_ai_draft_disabled_and_layout_passthrough():
     assert isinstance(ret, tuple) and json.loads(ret[0])["width"] == 1536 and ret[1:] == (1536, 1024)
 
 
+# ---------- 姿势注入（Pose Gallery 可选接入） ----------
+
+POSE_A = "全身单人・标准系 / 跪立 / 四肢着地・单腿后高抬 / 俯视"
+POSE_B = "全身单人・标准系 / 站姿 / S形站姿・胯部侧顶 / 正面"
+
+
+def _last_system_prompt():
+    msgs = MockHandler.requests[-1]["messages"]
+    assert msgs[0]["role"] == "system"
+    return msgs[0]["content"]
+
+
+def test_pose_directive_block_modes():
+    from py.translate import POSE_MARKER, pose_directive_block
+    # 无输入 / 关闭 → 空串：不接入姿势时 system prompt 与历史版本逐字节一致
+    assert pose_directive_block("", "", "自动") == ""
+    assert pose_directive_block("  ", None, "自动") == ""
+    assert pose_directive_block(POSE_A, POSE_B, "关闭") == ""
+    both = pose_directive_block(POSE_A, POSE_B, "自动")
+    assert POSE_A in both and POSE_B in both and POSE_MARKER in both
+    assert "further LEFT" in both and "双人" in both, "双参考须含左右分配与双人姿势规则"
+    assert "body-orientation" in both and "（俯视）" in both, "视角须随姿势段注入且不得转为镜头指令"
+    assert "REFERENCE WINS" in both and "never blend" in both, "冲突时参考姿势须完胜，禁止与散文动作融合"
+    only_a = pose_directive_block(POSE_A, "", "自动")
+    assert POSE_A in only_a and POSE_B not in only_a and "more prominent" in only_a
+    only_b = pose_directive_block("", POSE_B, "自动")
+    assert POSE_B in only_b and "Pose B" in only_b, "只接 pose_in_2 时按单一参考 Pose B 处理"
+    forced = pose_directive_block(POSE_A, POSE_B, "强制双人")
+    assert "exactly 2 characters" in forced
+
+
+def test_editor_pose_inputs_definition():
+    opt = MOSSEditor.INPUT_TYPES()["optional"]
+    # v1.7.1：pose_in/pose_in_2 为可点选/可手填 widget（不再 forceInput），连线时连线值优先
+    assert not opt["pose_in"][1].get("forceInput") and not opt["pose_in_2"][1].get("forceInput")
+    assert opt["pose_in"][1].get("multiline") and opt["pose_in"][1].get("default") == ""
+    modes, meta = opt["pose_mode"]
+    assert list(modes) == ["自动", "强制双人", "关闭"] and meta["default"] == "自动"
+
+
+def test_locate_pose_catalog():
+    import sys, tempfile, os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from server_routes import locate_pose_catalog
+    # 未安装 → None（不抛错）
+    assert locate_pose_catalog(custom_nodes_dirs=[]) is None
+    # 模拟已安装：custom_nodes/comfyui-pose-gallery/library/data/pose-zh.json
+    with tempfile.TemporaryDirectory() as td:
+        lib = _os.path.join(td, "comfyui-pose-gallery", "library", "data")
+        _os.makedirs(lib)
+        p = _os.path.join(lib, "pose-zh.json")
+        open(p, "w", encoding="utf-8").write("[]")
+        assert locate_pose_catalog(custom_nodes_dirs=[td]) == p
+
+
+def test_prose_to_layout_pose_prompt_assembly():
+    """无姿势 → system prompt 与历史逐字节一致；有姿势 → 末尾追加指令段。"""
+    from py.translate import append_agent_md, pose_directive_block
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(LAYOUT_ZH, ensure_ascii=False)] * 3
+
+        def call(**kw):
+            prose_to_layout("一段散文。", width=1024, height=1024,
+                            base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1",
+                            api_key="EMPTY", model="m", temperature=0.3,
+                            thinking="off", provider="custom", timeout=30, **kw)
+
+        call()
+        baseline = append_agent_md(DEFAULT_AI_DRAFT_PROMPT, "")
+        assert _last_system_prompt() == baseline, "无姿势时 system prompt 不得有任何变化"
+
+        call(pose_a=POSE_A, pose_b=POSE_B)
+        sys_with_pose = _last_system_prompt()
+        assert sys_with_pose == baseline + "\n\n" + pose_directive_block(POSE_A, POSE_B)
+        assert POSE_A in sys_with_pose and POSE_B in sys_with_pose
+
+        call(pose_a=POSE_A, pose_mode="关闭")
+        assert _last_system_prompt() == baseline, "关闭档必须等价于未接入"
+    finally:
+        srv.shutdown()
+
+
+def test_editor_run_passes_pose_to_llm():
+    """Editor 节点全链路：pose_in/pose_in_2/pose_mode 正确送达拆解 LLM 的 system prompt。"""
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(LAYOUT_ZH, ensure_ascii=False)] * 2
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+
+        def run_pose(**kw):
+            return MOSSEditor().run(
+                "一段特摄战斗的纯文本提示词。", 1024, 1024, "",
+                ai_draft=True, provider="custom", base_url=url, model="mock",
+                api_key="EMPTY", temperature=0.3, thinking="off", timeout=30, ai_prompt="",
+                **kw,
+            )
+
+        ret = run_pose(pose_in=POSE_A, pose_in_2=POSE_B, pose_mode="自动")
+        assert "mps_draft" in ret["ui"], "姿势路径不影响拆解写回"
+        assert POSE_A in _last_system_prompt() and POSE_B in _last_system_prompt()
+
+        run_pose(pose_in=POSE_A, pose_in_2=POSE_B, pose_mode="关闭")
+        assert POSE_A not in _last_system_prompt(), "关闭档不得把姿势送进 LLM"
+    finally:
+        srv.shutdown()
+
+
+def test_editor_is_changed_tracks_pose():
+    base = dict(source="散文", canvas_width=1024, canvas_height=1024, edits="",
+                ai_draft=True)
+    h0 = MOSSEditor.IS_CHANGED(**base)
+    assert MOSSEditor.IS_CHANGED(**base, pose_in=POSE_A) != h0, "换姿势必须让缓存失效"
+    assert MOSSEditor.IS_CHANGED(**base, pose_in_2=POSE_B) != h0
+    assert MOSSEditor.IS_CHANGED(**base, pose_mode="关闭") != h0
+    # 旧工作流姿势参数缺省（kwargs 兜底）也不得抛错
+    assert MOSSEditor.IS_CHANGED("散文", 1024, 1024, "", True)
+
+
+# ---------- 姿势本地注入（📥姿势 按钮，不调 LLM） ----------
+
+POSE_PAIR_DESC = "双人缠绵 / 立位贴身 / 面对面・抱起单膝 / 正面"
+
+
+def _mk_pose_draft():
+    """item0=左侧小角色(x中心128, 面积131072)；item1=右侧大角色(x中心768, 面积524288)。"""
+    return {
+        "width": 1024, "height": 1024,
+        "bbox_coord_space": "abs", "bbox_format": "xyxy",
+        "summary": {"meta": ["特摄"], "canvas": "single", "caption": "场景描述。"},
+        "items": [
+            {"label": "character", "caption": "左侧较小的人物", "bbox": [0, 512, 256, 1024]},
+            {"label": "character", "caption": "右侧较大的人物", "bbox": [512, 0, 1024, 1024]},
+            {"label": "object", "caption": "背景招牌", "bbox": [300, 300, 400, 400]},
+        ],
+    }
+
+
+def _captions(draft):
+    return [it["caption"] for it in draft["items"]]
+
+
+def test_pose_phrase_parsing():
+    from py.translate import _pose_phrase
+    # 图库四段格式：姿势名称 + 视角标注；体系段判定双人
+    assert _pose_phrase(POSE_A) == ("四肢着地・单腿后高抬（俯视）", False)
+    assert _pose_phrase(POSE_PAIR_DESC) == ("面对面・抱起单膝（正面）", True)
+    # 只有三段（缺视角）：不加括号
+    assert _pose_phrase("全身单人・标准系 / 跪立 / 四肢着地") == ("四肢着地", False)
+    # 手写文本（无 " / " 分段）：整句使用
+    assert _pose_phrase("手持长剑向前突进") == ("手持长剑向前突进", False)
+    assert _pose_phrase("") == ("", False)
+
+
+def test_apply_pose_single_character_replace_not_append():
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    draft = _mk_pose_draft()
+    draft["items"] = draft["items"][:1] + [draft["items"][2]]  # 只留 1 角色 + 1 物体
+    out = apply_pose_to_draft(draft, POSE_A, "")
+    assert out["items"][0]["caption"].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    assert POSE_MARKER not in out["items"][1]["caption"], "非角色条目不得被注入"
+    # 重复注入换姿势：替换而非叠加（幂等）
+    out = apply_pose_to_draft(out, POSE_B, "")
+    assert out["items"][0]["caption"].endswith(POSE_MARKER + "S形站姿・胯部侧顶（正面）")
+    assert out["items"][0]["caption"].count(POSE_MARKER) == 1
+    # 已有姿势段时保留段前原文
+    assert out["items"][0]["caption"].startswith("左侧较小的人物；姿势：")
+
+
+def test_apply_pose_dual_left_right_and_prominence():
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    # 双参考：按 bbox x 中心分配（左→A、右→B），与面积大小无关
+    d = apply_pose_to_draft(_mk_pose_draft(), POSE_A, POSE_B)
+    caps = _captions(d)
+    assert caps[0].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）"), "左角色应得 pose_in"
+    assert caps[1].endswith(POSE_MARKER + "S形站姿・胯部侧顶（正面）"), "右角色应得 pose_in_2"
+    # 单参考：给面积最大（最突出）的角色，另一人保留原文
+    d = apply_pose_to_draft(_mk_pose_draft(), POSE_A, "")
+    caps = _captions(d)
+    assert caps[1].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    assert POSE_MARKER not in caps[0]
+
+
+def test_apply_pose_pair_pose_hits_both():
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    d = apply_pose_to_draft(_mk_pose_draft(), POSE_PAIR_DESC, "")
+    caps = _captions(d)
+    assert caps[0].endswith(POSE_MARKER + "面对面・抱起单膝（正面）")
+    assert caps[1].endswith(POSE_MARKER + "面对面・抱起单膝（正面）"), "双人姿势应两人各写一段互动描述"
+    assert POSE_MARKER not in caps[2]
+    # 只接 pose_in_2 的双人姿势同样生效
+    d2 = apply_pose_to_draft(_mk_pose_draft(), "", POSE_PAIR_DESC)
+    assert _captions(d2)[0].endswith(POSE_MARKER + "面对面・抱起单膝（正面）")
+    # pose_in 单人 + pose_in_2 双人：双人参考整体套用给两人，忽略单人参考
+    d3 = apply_pose_to_draft(_mk_pose_draft(), POSE_A, POSE_PAIR_DESC)
+    caps = _captions(d3)
+    assert caps[0].endswith(POSE_MARKER + "面对面・抱起单膝（正面）")
+    assert caps[1].endswith(POSE_MARKER + "面对面・抱起单膝（正面）"), \
+        "pose_in_2 是双人姿势时必须写给两个角色"
+    assert "四肢着地" not in caps[0] and "四肢着地" not in caps[1], "单人参考应被忽略"
+    # pose_in 双人 + pose_in_2 单人：仍两人整体使用双人参考
+    d4 = apply_pose_to_draft(_mk_pose_draft(), POSE_PAIR_DESC, POSE_B)
+    caps = _captions(d4)
+    assert caps[0].endswith(POSE_MARKER + "面对面・抱起单膝（正面）")
+    assert caps[1].endswith(POSE_MARKER + "面对面・抱起单膝（正面）")
+    assert "S形站姿" not in caps[0] and "S形站姿" not in caps[1]
+
+
+def test_apply_pose_closeup_face_not_selected():
+    """真机反推踩坑回归（四联人像）：面部特写框 [579,0,1024,1024]（445x1024，
+    高宽比 2.3）面积 455k 全场最大，但三个全身框高宽比 5.5+ 更细长——
+    单参考必须注入全身框而非占满画布的特写脸。"""
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    d = _mk_pose_draft()
+    d["items"] = [
+        {"label": "character", "caption": "正面全身站姿，红衣女子", "bbox": [31, 46, 195, 957]},   # 164x911 比5.6 档2
+        {"label": "character", "caption": "面部大特写", "bbox": [579, 0, 1024, 1024]},             # 445x1024 比2.3 档1
+    ]
+    out = apply_pose_to_draft(d, POSE_A, "")
+    caps = _captions(out)
+    assert POSE_MARKER in caps[0], "细长全身框应被优先选中"
+    assert POSE_MARKER not in caps[1], "面部特写不应获得站姿"
+
+
+def test_apply_pose_all_closeup_falls_back_to_area():
+    """全是特写（无更细长框）时同档退回纯面积最大，不失效。"""
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    d = _mk_pose_draft()
+    d["items"] = [
+        {"label": "character", "caption": "小特写", "bbox": [0, 0, 300, 600]},    # 300x600 比2.0
+        {"label": "character", "caption": "大特写", "bbox": [400, 100, 900, 900]}, # 500x800 比1.6
+    ]
+    out = apply_pose_to_draft(d, POSE_A, "")
+    # 两者都 <2.5 同为档1；小的反而更细长(档更高)？300x600 比2.0 仍档1，500x800 比1.6 档1
+    # 同档比面积 → 大特写 400k 胜小特写 180k
+    assert POSE_MARKER in _captions(out)[1]
+
+
+def test_apply_pose_target_index_selection():
+    from py.translate import POSE_MARKER, apply_pose_to_draft
+    d = apply_pose_to_draft(_mk_pose_draft(), POSE_A, POSE_B, target_index=1)
+    caps = _captions(d)
+    assert caps[1].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    assert POSE_MARKER not in caps[0], "指定目标时其他角色不动"
+    for bad in (2, 99):  # 物体下标 / 越界：明确报错
+        try:
+            apply_pose_to_draft(_mk_pose_draft(), POSE_A, "", target_index=bad)
+            assert False, f"target_index={bad} 应报错"
+        except ValueError:
+            pass
+
+
+def test_apply_pose_error_matrix():
+    from py.translate import apply_pose_to_draft
+    cases = [
+        ("关闭档", dict(draft=_mk_pose_draft(), pose_a=POSE_A, pose_b="", mode="关闭")),
+        ("无姿势输入", dict(draft=_mk_pose_draft(), pose_a="", pose_b="")),
+        ("无角色条目", dict(draft={"items": [{"label": "object", "caption": "x", "bbox": [0, 0, 9, 9]}]},
+                     pose_a=POSE_A, pose_b="")),
+        ("非布局形态", dict(draft={"width": 1024}, pose_a=POSE_A, pose_b="")),
+    ]
+    for name, kw in cases:
+        try:
+            apply_pose_to_draft(**kw)
+            assert False, f"{name} 应报错"
+        except ValueError:
+            pass
+    # 独立校验闸门：注入前草稿本身不合法（bbox 缺失）→ 注入后 validate 拒绝
+    bad = _mk_pose_draft()
+    del bad["items"][0]["bbox"]
+    try:
+        apply_pose_to_draft(bad, POSE_A, "")
+        assert False, "非法草稿应被注入路径的 validate_draft 拦下"
+    except Exception:
+        pass
+
+
+def _run_editor_pose(edits_text, source="", sig="", **pose_kw):
+    return MOSSEditor().run(
+        source, 1024, 1024, edits_text, ai_draft=False,
+        edits_source_sig=sig, **pose_kw,
+    )
+
+
+def test_editor_run_apply_pose_writeback_and_errors():
+    from py.translate import POSE_MARKER
+    draft = _mk_pose_draft()
+    # ① 画布 edits 持有布局（拆解写回 / 反推 canvas_zh 的形态）：自动分配注入 → ui.mps_draft 写回
+    ret = _run_editor_pose(json.dumps(draft, ensure_ascii=False), apply_pose=-2, pose_in=POSE_A)
+    caps = _captions(json.loads(ret["ui"]["mps_draft"]))
+    assert caps[1].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    assert json.loads(ret["result"][0])["items"][1]["caption"] == caps[1], "输出与写回一致"
+    # ② 指定目标下标：只注入选中角色
+    ret = _run_editor_pose(json.dumps(_mk_pose_draft(), ensure_ascii=False),
+                           apply_pose=0, pose_in=POSE_A)
+    caps = _captions(json.loads(ret["ui"]["mps_draft"]))
+    assert caps[0].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    assert POSE_MARKER not in caps[1]
+    # ③ apply_pose 缺省（-1）：普通 Queue 不注入、不产生 ui —— 三节点原行为零变化
+    ret = _run_editor_pose(json.dumps(draft, ensure_ascii=False), pose_in=POSE_A)
+    assert isinstance(ret, tuple) and len(ret) == 3, "无注入时保持普通三元组返回"
+    # ④ 输入是散文（如反推 prose_zh 刚写入 source、edits 旧签名失效）：注入须明确报错
+    try:
+        _run_editor_pose(json.dumps(draft, ensure_ascii=False), source="一段散文。",
+                         sig=source_signature("一段散文。") + "x",  # 签名不匹配 → 以 source 为准
+                         apply_pose=-2, pose_in=POSE_A)
+        assert False, "caption 形态注入应报错引导用户先拆解"
+    except ValueError as e:
+        assert "拆解" in str(e)
+    # ⑤ IS_CHANGED：apply_pose != -1 绕过缓存（保证写回必达），缺省走哈希路径
+    assert MOSSEditor.IS_CHANGED("散文", 8, 8, "", False, apply_pose=-2) != \
+        MOSSEditor.IS_CHANGED("散文", 8, 8, "", False)
+    import math
+    assert math.isnan(MOSSEditor.IS_CHANGED("散文", 8, 8, "", False, apply_pose=0))
+
+
+def test_editor_apply_pose_after_reverse_flows():
+    """与反推节点关联：反推两种产物形态（draft_zh→source / canvas_zh→edits）都可注入。"""
+    from py.translate import POSE_MARKER
+    draft = _mk_pose_draft()
+    draft_json = json.dumps(draft, ensure_ascii=False)
+    # 反推 draft_zh：layout 写入 source（ai_draft 已被前端关掉）→ 直接注入
+    ret = MOSSEditor().run(draft_json, 1024, 1024, "", ai_draft=False,
+                           apply_pose=-2, pose_in=POSE_A)
+    caps = _captions(json.loads(ret["ui"]["mps_draft"]))
+    assert caps[1].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+    # 反推 canvas_zh：layout 写入 edits，source 仍是原散文且签名匹配 → 注入 edits 画布
+    sig = source_signature("一段散文。")
+    ret = MOSSEditor().run("一段散文。", 1024, 1024, draft_json, ai_draft=False,
+                           edits_source_sig=sig, apply_pose=-2, pose_in=POSE_A)
+    caps = _captions(json.loads(ret["ui"]["mps_draft"]))
+    assert caps[1].endswith(POSE_MARKER + "四肢着地・单腿后高抬（俯视）")
+
+
+def test_editor_run_ui_carries_source_sig():
+    """ui.mps_src_sig 回传本次执行实际使用的 source 签名（apply_pose + AI 拆解）。"""
+    draft = _mk_pose_draft()
+    # ① apply_pose 分支：source 为空、布局在 edits
+    ret = _run_editor_pose(json.dumps(draft, ensure_ascii=False),
+                           apply_pose=-2, pose_in=POSE_A)
+    assert "mps_draft" in ret["ui"]
+    assert ret["ui"]["mps_src_sig"] == source_signature("")
+
+    # ② apply_pose 分支：source 散文 + edits 签名匹配
+    sig = source_signature("一段散文。")
+    ret = MOSSEditor().run("一段散文。", 1024, 1024,
+                           json.dumps(draft, ensure_ascii=False), ai_draft=False,
+                           edits_source_sig=sig, apply_pose=-2, pose_in=POSE_A)
+    assert ret["ui"]["mps_src_sig"] == sig
+
+    # ③ 普通 layout 透传（无 mps_draft）保持原三元组返回
+    ret = MOSSEditor().run(json.dumps(draft, ensure_ascii=False), 1024, 1024, "",
+                           ai_draft=False)
+    assert isinstance(ret, tuple) and len(ret) == 3
+
+    # ③b source 首尾空白必须与前端 currentSourceSig 一样按 trim 后签名，避免误判 stale
+    ret = MOSSEditor().run("  一段散文。\n", 1024, 1024,
+                           json.dumps(draft, ensure_ascii=False), ai_draft=False,
+                           edits_source_sig=sig, apply_pose=-2, pose_in=POSE_A)
+    assert ret["ui"]["mps_src_sig"] == sig
+
+    # ④ AI 拆解分支同样回传签名
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(LAYOUT_ZH, ensure_ascii=False)]
+        ret = _run_editor_ai(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        assert "mps_draft" in ret["ui"]
+        assert ret["ui"]["mps_src_sig"] == source_signature("一段特摄战斗的纯文本提示词。")
+    finally:
+        srv.shutdown()
+
+
 # ---------- minimax / 视觉反推 / 连接测试 ----------
 
 def test_minimax_endpoint_and_body():
@@ -931,7 +1311,7 @@ def test_probe_auth_failed():
     try:
         d = run_probe({
             "provider": "custom", "base_url": f"http://127.0.0.1:{srv.server_address[1]}/v1",
-            "model": "mock", "api_key": "sk-test", "thinking": "off", "timeout": 10,
+            "model": "mock", "api_key": "test-key", "thinking": "off", "timeout": 10,
         })
         assert d["ok"] is False and d["error_type"] == "auth_failed" and d["status"] == 401
         assert SequenceHandler.hits == 1
@@ -1252,8 +1632,61 @@ def _with_config(cfg, fn):
         os.unlink(path)
 
 
+@contextlib.contextmanager
+def _config_env(cfg):
+    """异步测试用的 config.json 环境变量上下文（_with_config 只支持同步回调）。"""
+    old = os.environ.get("COMFY_MOSS_STUDIO_CONFIG")
+    path = _temp_config(cfg)
+    os.environ["COMFY_MOSS_STUDIO_CONFIG"] = path
+    try:
+        yield
+    finally:
+        os.environ.pop("COMFY_MOSS_STUDIO_CONFIG", None)
+        if old is not None:
+            os.environ["COMFY_MOSS_STUDIO_CONFIG"] = old
+        os.unlink(path)
+
+
+class RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """按 server.redirect_location 返回 302；为空时直接返回 200 JSON。"""
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        loc = getattr(self.server, "redirect_location", "")
+        if loc:
+            self.send_response(302)
+            self.send_header("Location", loc)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self._json()
+
+    def do_GET(self):
+        self._json()
+
+    def _json(self):
+        body = json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def _start_redirect(location):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    srv.redirect_location = location
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+
 def test_sanitize_secret_redacts_key_and_urls():
-    key = "sk-live-SECRET-1234567890"
+    key = "test-key-live"
     text = (f"Incorrect API key provided: {key} | Authorization: Bearer {key} | "
             f"https://user:{key}@host.example/v1?api_key={key}")
     out = sanitize_secret(text, key)
@@ -1261,13 +1694,13 @@ def test_sanitize_secret_redacts_key_and_urls():
     assert "user:" not in out
     assert "api_key=" not in out
     # 即使调用方没传 key，也要按 Bearer/URL 规则兜底
-    out2 = sanitize_secret("Authorization: Bearer abcdefghijklmnop https://u:p@x/y?token=z")
-    assert "abcdefghijklmnop" not in out2 and "u:p@" not in out2
+    out2 = sanitize_secret("Authorization: Bearer dummy-token https://u:p@x/y?token=z")
+    assert "dummy-token" not in out2 and "u:p@" not in out2
     assert "?***" in sanitize_secret("see https://x.example/v1?key=secret", "")
 
 
 def test_chat_error_echoing_key_is_redacted():
-    key = "sk-echo-SECRET-abcdef123456"
+    key = "test-key-echo"
     srv = _start_echo_key(401, key)
     buf = io.StringIO()
     try:
@@ -1286,7 +1719,7 @@ def test_chat_error_echoing_key_is_redacted():
 
 
 def test_translator_final_error_redacts_key():
-    key = "sk-retry-SECRET-abcdef123456"
+    key = "test-key-retry"
     srv = _start_echo_key(500, key)
     buf = io.StringIO()
     try:
@@ -1306,6 +1739,168 @@ def test_translator_final_error_redacts_key():
         srv.shutdown()
 
 
+def test_chat_cross_host_redirect_does_not_leak_key():
+    """主 LLM 通道：跨主机 302 不得把 Authorization 带到目标主机；同主机 302 仍可用。"""
+    key = "test-key-redirect"
+    target = _start_recording([(200, {
+        "model": "mock", "choices": [{"message": {"content": "OK"}}],
+    })])
+    target_url = f"http://127.0.0.1:{target.server_address[1]}/v1/chat/completions"
+    # 第二个端口模拟攻击者主机：A 收到带 key 的请求后 302 到 B
+    a = _start_redirect(target_url)
+    a_url = f"http://127.0.0.1:{a.server_address[1]}/v1"
+    try:
+        try:
+            chat(a_url, key, {"model": "m", "stream": False}, 5)
+            raise AssertionError("跨主机 302 应抛 TranslationError")
+        except TranslationError as e:
+            assert "302" in str(e), f"错误信息应含状态码: {e}"
+        assert RecordingHandler.hits == 0, "重定向目标主机不得收到任何请求"
+        assert not RecordingHandler.headers_seen, "Authorization 不得被转发到新主机"
+
+        # 探测通道共用同一实现：_post_once 同样不跟随跨主机重定向
+        d = _post_once(target_url.replace(
+            f"127.0.0.1:{target.server_address[1]}", f"127.0.0.1:{a.server_address[1]}"),
+            key, {"model": "m"}, 5)
+        assert d["ok"] is False and d["status"] == 302
+        assert RecordingHandler.hits == 0
+    finally:
+        a.shutdown()
+        target.shutdown()
+
+    # 同 scheme/host/port 的重定向保持默认行为（不影响正常网关跳转）
+    same = _start_redirect("/ok")
+    try:
+        content = chat(f"http://127.0.0.1:{same.server_address[1]}/v1", key,
+                       {"model": "m", "stream": False}, 5)
+        assert content == "OK", "同主机重定向必须仍然可用"
+    finally:
+        same.shutdown()
+
+
+def test_chat_response_body_is_capped():
+    """主 LLM 通道只读 _MAX_RESPONSE：超大响应体截断后按坏 JSON 报错，不会无限读入。"""
+    from py.translate import _MAX_RESPONSE
+    assert _MAX_RESPONSE == 1_000_000
+    srv = _start_mock()
+    try:
+        huge = json.dumps({"choices": [{"message": {"content": "x" * 2_000_000}}]})
+        assert len(huge) > _MAX_RESPONSE
+        MockHandler.queue = [huge]
+        try:
+            chat(f"http://127.0.0.1:{srv.server_address[1]}/v1", "EMPTY",
+                 {"model": "m", "stream": False}, 10)
+            raise AssertionError("超过上限的响应体被截断后必须按坏响应报错")
+        except TranslationError as e:
+            assert "JSON" in str(e), f"截断后应按坏 JSON 报错: {e}"
+        assert MockHandler.hits == 1, "不得因超大 body 重试读取"
+    finally:
+        srv.shutdown()
+
+
+def test_probe_minimax_200_business_error():
+    """HTTP 200 + base_resp 业务错误：不得因 _sanitize 三参调用抛 TypeError。"""
+    srv = _start_recording([(200, {
+        "base_resp": {"status_code": 1004, "status_msg": "invalid api key"},
+    })])
+    try:
+        d = run_probe({
+            "provider": "custom", "base_url": f"http://127.0.0.1:{srv.server_address[1]}/v1",
+            "model": "mock", "api_key": "EMPTY", "thinking": "off", "timeout": 10,
+        })
+        assert d["ok"] is False, "业务错误必须判失败，不能退化成 internal_error"
+        assert d["error_type"] == "bad_request"
+        assert "1004" in d["message"] and "invalid api key" in d["message"]
+        assert "invalid api key" in d["detail"]
+        assert RecordingHandler.hits == 1, "200+业务错误不应再补文本 ping"
+    finally:
+        srv.shutdown()
+
+
+def test_editor_is_changed_tracks_llm_config():
+    """改 provider/model/思考档/温度/拆解契约/AGENT.md 必须让普通 Queue 缓存失效。"""
+    base = dict(source="散文", canvas_width=1024, canvas_height=1024, edits="",
+                ai_draft=True)
+    h0 = MOSSEditor.IS_CHANGED(**base)
+    variants = (
+        {"provider": "deepseek"},
+        {"base_url": "http://127.0.0.1:9/v1"},
+        {"model": "deepseek-chat"},
+        {"api_key": "test-key"},
+        {"temperature": 0.9},
+        {"thinking": "high"},
+        {"timeout": 60},
+        {"ai_prompt": "COMPLETELY DIFFERENT CONTRACT"},
+        {"agent_md": "other.md"},
+    )
+    for kw in variants:
+        assert MOSSEditor.IS_CHANGED(**base, **kw) != h0, f"改 {kw} 必须让缓存失效"
+    assert MOSSEditor.IS_CHANGED(**base) == h0, "相同输入必须保持相同哈希"
+
+    # AGENT.md 实际文本变化（同一选择项）也要失效
+    with tempfile.TemporaryDirectory() as td:
+        md = os.path.join(td, "AGENT.md")
+        old_env = os.environ.get("COMFY_MOSS_STUDIO_AGENT_MD")
+        os.environ["COMFY_MOSS_STUDIO_AGENT_MD"] = md
+        try:
+            with open(md, "w", encoding="utf-8") as f:
+                f.write("指令 A")
+            h_a = MOSSEditor.IS_CHANGED(**base)
+            with open(md, "w", encoding="utf-8") as f:
+                f.write("指令 B")
+            h_b = MOSSEditor.IS_CHANGED(**base)
+            assert h_a != h_b, "AGENT.md 内容变化必须让缓存失效"
+        finally:
+            if old_env is None:
+                os.environ.pop("COMFY_MOSS_STUDIO_AGENT_MD", None)
+            else:
+                os.environ["COMFY_MOSS_STUDIO_AGENT_MD"] = old_env
+
+    # config.json 内容变化同样纳入缓存键
+    h_cfg1 = _with_config({"probe_allow_private": False}, lambda: MOSSEditor.IS_CHANGED(**base))
+    h_cfg2 = _with_config({"probe_allow_private": True}, lambda: MOSSEditor.IS_CHANGED(**base))
+    assert h_cfg1 != h_cfg2, "config.json 内容变化必须让缓存失效"
+
+
+def test_pose_reinject_preserves_caption_tail():
+    """重复 📥姿势 只保留已知遮挡后缀，其余旧姿势段（含手填逗号描述）整段替换。"""
+    from py.translate import (OCCL_BACK, OCCL_FRONT, POSE_MARKER, _pose_set_caption,
+                              apply_pose_to_draft)
+    draft = _mk_pose_draft()
+    draft["items"] = draft["items"][:1] + [draft["items"][2]]  # 只留 1 角色 + 1 物体
+    out = apply_pose_to_draft(draft, POSE_A, "")
+    out["items"][0]["caption"] += OCCL_FRONT
+    out = apply_pose_to_draft(out, POSE_B, "")
+    cap = out["items"][0]["caption"]
+    assert cap.endswith(OCCL_FRONT), "遮挡措辞不得被重复注入吞掉"
+    assert "S形站姿・胯部侧顶（正面）" in cap and "四肢着地" not in cap, "姿势段必须已更新"
+    assert cap.count(POSE_MARKER) == 1
+
+    # OCCL_BACK 同样保留
+    item = {"label": "character", "caption": "某人；姿势：跪立" + OCCL_BACK}
+    _pose_set_caption(item, POSE_A)
+    assert item["caption"] == "某人；姿势：四肢着地・单腿后高抬（俯视）" + OCCL_BACK
+
+    # 手填描述自带中文逗号：旧片段（双手插兜）必须整段丢弃，不得残留
+    item = {"label": "character", "caption": "某人"}
+    _pose_set_caption(item, "站立，双手插兜")
+    _pose_set_caption(item, POSE_A)
+    assert "双手插兜" not in item["caption"], "旧手填描述的逗号尾段不得被当成遮挡措辞"
+    assert item["caption"] == "某人；姿势：四肢着地・单腿后高抬（俯视）"
+    assert item["caption"].count(POSE_MARKER) == 1
+
+    # 旧段含逗号 + 已知遮挡后缀：保留后缀、丢弃旧动作片段
+    item = {"label": "character", "caption": "某人；姿势：站立，双手插兜" + OCCL_FRONT}
+    _pose_set_caption(item, POSE_B)
+    assert item["caption"] == "某人；姿势：S形站姿・胯部侧顶（正面）" + OCCL_FRONT
+    assert "双手插兜" not in item["caption"]
+
+    # 无标记时行为不变
+    item = {"label": "character", "caption": "某人"}
+    _pose_set_caption(item, POSE_A)
+    assert item["caption"] == "某人；姿势：四肢着地・单腿后高抬（俯视）"
+
+
 def test_origin_evaluation():
     assert evaluate_origin({"Sec-Fetch-Site": "same-origin"}, "127.0.0.1:8000") == "same-origin"
     assert evaluate_origin({"Sec-Fetch-Site": "cross-site"}, "127.0.0.1:8000") == "cross-origin"
@@ -1322,7 +1917,7 @@ def test_origin_evaluation():
 
 
 def test_probe_never_sends_config_key_to_foreign_base_url():
-    key = "sk-config-SECRET-abcdef123456"
+    key = "test-key-config"
     srv = _start_recording([(200, {
         "model": "mock", "choices": [{"message": {"content": "Red"}}],
     })])
@@ -1377,6 +1972,42 @@ def test_probe_untrusted_private_target_blocked():
         "model": "mock", "api_key": "EMPTY", "thinking": "off", "timeout": 10,
     }, allow_config_key=False, allow_private_targets=False)
     assert d["ok"] is False and d["error_type"] == "forbidden_target"
+
+
+def test_host_is_private_fails_closed_on_dns_error():
+    """P2-13：DNS 解析失败必须按私网阻断；多 IP 中任一私网也判私网。"""
+    import socket as _socket
+
+    from py.vision_probe import _host_is_private
+
+    orig = _socket.getaddrinfo
+    try:
+        def raise_gaierror(*a, **kw):
+            raise _socket.gaierror("name resolution failed")
+
+        _socket.getaddrinfo = raise_gaierror
+        assert _host_is_private("http://attacker.invalid/v1") is True, \
+            "DNS 失败必须 fail-closed，不能放行"
+        d = run_probe({
+            "provider": "custom", "base_url": "http://attacker.invalid/v1",
+            "model": "mock", "api_key": "EMPTY", "thinking": "off", "timeout": 10,
+        }, allow_config_key=False, allow_private_targets=False)
+        assert d["ok"] is False and d["error_type"] == "forbidden_target"
+
+        # 多 A 记录：任一条是私网 → 整体按私网处理
+        _socket.getaddrinfo = lambda *a, **kw: [
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("10.0.0.7", 0)),
+        ]
+        assert _host_is_private("http://mixed.example/v1") is True
+
+        # 全部公网 → 放行
+        _socket.getaddrinfo = lambda *a, **kw: [
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+        ]
+        assert _host_is_private("http://public.example/v1") is False
+    finally:
+        _socket.getaddrinfo = orig
 
 
 def test_probe_error_classification():
@@ -1588,11 +2219,14 @@ def test_editor_legacy_widget_order():
     ]
     req = list(MOSSEditor.INPUT_TYPES()["required"])
     opt = list(MOSSEditor.INPUT_TYPES()["optional"])
+    # forceInput 输入不生成 widget；pose_mode/apply_pose 保持 v1.7.0 尾部定位，
+    # pose_in/pose_in_2 是 v1.7.1 追加在其后的新 widget
     widget_order = list(req) + [k for k in opt
                                 if k not in ("underlay", "reverse_in")]
     assert widget_order[:len(old_order)] == old_order, \
         f"Editor 旧 widgets_values 索引错位: {widget_order[:len(old_order)]}"
-    assert widget_order[len(old_order):] == ["edits_source_sig", "force_split"]
+    assert widget_order[len(old_order):] == ["edits_source_sig", "force_split",
+                                             "pose_mode", "apply_pose", "pose_in", "pose_in_2"]
 
 
 def test_sniff_compiled_errors_are_friendly():
@@ -1690,8 +2324,11 @@ def test_route_same_origin_integration():
                     headers={"Origin": f"http://127.0.0.1:{port}"},
                 )
                 data = await r.json()
-                assert r.status == 200 and data["ok"] is True
-                assert data.get("content_excerpt") == "Red"
+                # 同源 ≠ 可信：默认配置（probe_allow_private=false）禁止私网目标
+                assert r.status == 200
+                assert data["ok"] is False and data["error_type"] == "forbidden_target"
+                assert "content_excerpt" not in data
+                assert RecordingHandler.hits == 0, "未开 probe_allow_private 时同源也不得探测内网"
 
                 # 无 Origin/Sec-Fetch-Site（脚本调用）：允许请求，但不得访问本地/内网，
                 # 也不回退配置 key；响应同样不返回上游 detail/content_excerpt。
@@ -1700,7 +2337,24 @@ def test_route_same_origin_integration():
                 assert r.status == 200
                 assert data["ok"] is False and data["error_type"] == "forbidden_target"
                 assert "content_excerpt" not in data and "detail" not in data
-                assert RecordingHandler.hits == 1, "无法判断来源的请求不应触达内网上游"
+                assert RecordingHandler.hits == 0, "无法判断来源的请求不应触达内网上游"
+
+                # 显式开启 probe_allow_private 后同源才放行（本地 Ollama/LM Studio 场景）
+                with _config_env({"probe_allow_private": True}):
+                    r = await client.post(
+                        "/moss_studio/test_connection", json=body,
+                        headers={"Origin": f"http://127.0.0.1:{port}"},
+                    )
+                    data = await r.json()
+                    assert r.status == 200 and data["ok"] is True
+                    assert data.get("content_excerpt") == "Red"
+                    assert RecordingHandler.hits == 1
+
+                    # 开关只对可信（同源）来源生效：脚本调用仍禁止私网
+                    r = await client.post("/moss_studio/test_connection", json=body)
+                    data = await r.json()
+                    assert data["ok"] is False and data["error_type"] == "forbidden_target"
+                    assert RecordingHandler.hits == 1, "非可信来源不得借开关探测内网"
             finally:
                 await client.close()
 
@@ -1712,6 +2366,107 @@ def test_route_same_origin_integration():
         else:
             sys.modules.pop("server", None)
         target.shutdown()
+
+
+def test_pose_catalog_route_cache():
+    """pose_catalog 路由：进程内 (path, mtime_ns, size) 缓存 + 索引更新后自动失效。"""
+    import asyncio
+    import builtins
+    import types as pytypes
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    import server_routes
+
+    with tempfile.TemporaryDirectory() as td:
+        lib = os.path.join(td, "data")
+        os.makedirs(lib)
+        path = os.path.join(lib, "pose-zh.json")
+
+        def write_rows(n):
+            rows = [{
+                "id": f"p{i}", "体系": "单人", "分类": "站姿",
+                "姿势名称": f"姿势{i}", "角度": "正面", "检索": f"p{i}",
+            } for i in range(n)]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False)
+
+        write_rows(1)
+        old_env = os.environ.get("COMFYUI_POSE_GALLERY_LIBRARY")
+        os.environ["COMFYUI_POSE_GALLERY_LIBRARY"] = td
+
+        routes = web.RouteTableDef()
+
+        class FakeRouter:
+            frozen = False
+
+        fake = pytypes.SimpleNamespace(
+            routes=routes,
+            app=pytypes.SimpleNamespace(router=FakeRouter()),
+        )
+        fake_server_mod = pytypes.ModuleType("server")
+        fake_server_mod.PromptServer = pytypes.SimpleNamespace(instance=fake)
+        old_mod = sys.modules.get("server")
+        old_registered = server_routes._REGISTERED
+        sys.modules["server"] = fake_server_mod
+        server_routes._REGISTERED = False
+        server_routes._POSE_CACHE.clear()
+
+        # 统计路由对索引文件的实际 open 次数（命中缓存时不得再读文件）
+        real_open = builtins.open
+        reads = []
+
+        def counting_open(file, *a, **kw):
+            if os.path.abspath(str(file)) == os.path.abspath(path):
+                reads.append(str(file))
+            return real_open(file, *a, **kw)
+
+        async def run():
+            app = web.Application()
+            app.add_routes(routes)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                r = await client.get("/moss_studio/pose_catalog")
+                data = await r.json()
+                assert r.status == 200 and data["ok"] is True
+                assert data["count"] == 1 and data["items"][0]["name"] == "姿势0"
+                assert r.headers.get("Cache-Control") == "no-store"
+                assert len(reads) == 1
+
+                r = await client.get("/moss_studio/pose_catalog")
+                data = await r.json()
+                assert data["count"] == 1
+                assert len(reads) == 1, "第二次请求必须命中缓存，不得重读文件"
+
+                # 索引更新（size + mtime 变化）→ 缓存失效并返回新数据
+                write_rows(2)
+                st = os.stat(path)
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+                r = await client.get("/moss_studio/pose_catalog")
+                data = await r.json()
+                assert data["count"] == 2
+                assert len(reads) == 2, "mtime/size 变化后必须重新读取"
+            finally:
+                await client.close()
+
+        server_routes.open = counting_open
+        try:
+            server_routes.register_routes()
+            asyncio.run(run())
+        finally:
+            server_routes.__dict__.pop("open", None)
+            server_routes._POSE_CACHE.clear()
+            server_routes._REGISTERED = old_registered
+            if old_mod is not None:
+                sys.modules["server"] = old_mod
+            else:
+                sys.modules.pop("server", None)
+            if old_env is None:
+                os.environ.pop("COMFYUI_POSE_GALLERY_LIBRARY", None)
+            else:
+                os.environ["COMFYUI_POSE_GALLERY_LIBRARY"] = old_env
 
 
 TESTS = [
@@ -1757,11 +2512,16 @@ TESTS = [
     test_sanitize_secret_redacts_key_and_urls,
     test_chat_error_echoing_key_is_redacted,
     test_translator_final_error_redacts_key,
+    test_chat_cross_host_redirect_does_not_leak_key,
+    test_chat_response_body_is_capped,
     test_origin_evaluation,
     test_probe_never_sends_config_key_to_foreign_base_url,
     test_route_same_origin_integration,
+    test_pose_catalog_route_cache,
     test_probe_untrusted_private_target_blocked,
+    test_host_is_private_fails_closed_on_dns_error,
     test_probe_error_classification,
+    test_probe_minimax_200_business_error,
     test_probe_image_detail_and_vision_warning,
     test_editor_source_signature_priority,
     test_editor_stale_edits_ai_draft_uses_new_source,
@@ -1769,6 +2529,26 @@ TESTS = [
     test_editor_legacy_widget_order,
     test_sniff_compiled_errors_are_friendly,
     test_token_stream_semantics,
+    # 姿势注入（拆解 LLM 路径 + 📥姿势 本地注入路径 + 反推关联）
+    test_pose_directive_block_modes,
+    test_editor_pose_inputs_definition,
+    test_locate_pose_catalog,
+    test_prose_to_layout_pose_prompt_assembly,
+    test_editor_run_passes_pose_to_llm,
+    test_editor_is_changed_tracks_pose,
+    test_editor_is_changed_tracks_llm_config,
+    test_pose_phrase_parsing,
+    test_apply_pose_single_character_replace_not_append,
+    test_pose_reinject_preserves_caption_tail,
+    test_apply_pose_dual_left_right_and_prominence,
+    test_apply_pose_pair_pose_hits_both,
+    test_apply_pose_target_index_selection,
+    test_apply_pose_closeup_face_not_selected,
+    test_apply_pose_all_closeup_falls_back_to_area,
+    test_apply_pose_error_matrix,
+    test_editor_run_apply_pose_writeback_and_errors,
+    test_editor_run_ui_carries_source_sig,
+    test_editor_apply_pose_after_reverse_flows,
 ]
 
 

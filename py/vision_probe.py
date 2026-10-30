@@ -40,22 +40,17 @@ except ImportError:  # 兼容非包方式导入
     )
     from vision import image_detail_for
 
+try:
+    from .http_safe import SameHostRedirect
+except ImportError:  # 兼容非包方式导入
+    from http_safe import SameHostRedirect
+
 _VISION_PROMPT = "What is the dominant color of this image? Reply with one English color word."
 _PNG_CACHE = None
 _MAX_RESPONSE = 1_000_000
 
-
-class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
-    """带 Authorization 的探测请求不跟随跨主机重定向，避免 key 被带到第三方。"""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        old = urllib.parse.urlsplit(req.full_url)
-        new = urllib.parse.urlsplit(newurl)
-        if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
-            raise urllib.error.HTTPError(
-                req.full_url, code, "cross-host redirect blocked", headers, fp
-            )
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+# 旧名保留：同主机重定向限制已提到 py/http_safe.py，探测与主 LLM 通道共用
+_SameHostRedirect = SameHostRedirect
 
 
 def _opener():
@@ -65,7 +60,7 @@ def _opener():
             handlers = []
     except Exception:
         pass
-    handlers.append(_SameHostRedirect())
+    handlers.append(SameHostRedirect())
     return urllib.request.build_opener(*handlers)
 
 
@@ -101,8 +96,8 @@ def _mask_key(key: str) -> str:
     return key[:3] + "..." + key[-4:]
 
 
-def _sanitize(text: str, key: str) -> str:
-    return sanitize_secret(text, key, limit=500)
+def _sanitize(text: str, key: str, limit: int = 500) -> str:
+    return sanitize_secret(text, key, limit=limit)
 
 
 # ---------- 同源判断（server_routes 与测试共用，不依赖 aiohttp）----------
@@ -154,7 +149,12 @@ def evaluate_origin(headers, host_header: str) -> str:
 
 
 def _host_is_private(url: str) -> bool:
-    """目标是否为本机/内网/链路本地地址（用于非浏览器同源请求的 SSRF 防护）。"""
+    """目标是否为本机/内网/链路本地地址（用于 SSRF 防护）。
+
+    解析失败按私网处理（fail-closed）；解析出多个 IP 时任一为私网即判私网。
+    注意：本函数与 urllib 实际连接是两次独立 DNS 解析，仍存在 DNS rebinding
+    的 TOCTOU 窗口（见 REVIEW-CODE-P0-P2 #13 的残余风险说明）。
+    """
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
     except ValueError:
@@ -166,7 +166,9 @@ def _host_is_private(url: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, OSError):
-        return False  # 解析失败交给实际请求报 DNS 错误
+        # fail-closed：解析失败无法证明目标是公网地址，按私网/阻断处理，
+        # 防止攻击者用 SERVFAIL/NXDOMAIN 让检查放行、实际连接时再解析到内网。
+        return True
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
@@ -174,8 +176,24 @@ def _host_is_private(url: str) -> bool:
             continue
         if (ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            # 任一解析结果落在私网即阻断（多 A/AAAA 记录不能只看第一条）
             return True
     return False
+
+
+def probe_allow_private(config: dict | None = None) -> bool:
+    """config.json 顶层 probe_allow_private（默认 false）。
+
+    即使请求来自 ComfyUI 同源页面，也默认禁止连接测试访问本机/内网地址：
+    同源只代表"页面里跑的脚本"（任意第三方自定义节点前端都在同源上下文），
+    不能作为内网探测代理的信任边界。需要测试本地 Ollama / LM Studio 的用户
+    在 config.json 显式写 "probe_allow_private": true 打开。
+    """
+    try:
+        cfg = config if isinstance(config, dict) else load_config()
+    except Exception:
+        return False  # 配置损坏时按最安全侧失败
+    return cfg.get("probe_allow_private") is True
 
 
 def _business_error(detail: str):
@@ -377,7 +395,9 @@ def run_probe(p: dict, *, allow_config_key: bool = True,
     allow_config_key: 调用者是否可回退 config.json 的 key。HTTP 路由只有在
       浏览器同源请求时才传 True；即使 True，也仅当 base_url 等于该 provider
       的 config/默认地址时才回退（防止 key 被发到调用者指定的任意地址）。
-    allow_private_targets: 非浏览器同源请求（无法判断来源）禁止访问本地/内网。
+    allow_private_targets: 是否允许访问本地/内网地址。浏览器同源请求也只在
+      config.json 的 probe_allow_private=true 时才由路由放行；无法判断来源的
+      脚本请求一律禁止。
     """
     t0 = time.perf_counter()
     provider = str(p.get("provider") or "").strip()
@@ -412,7 +432,7 @@ def run_probe(p: dict, *, allow_config_key: bool = True,
     if not allow_private_targets and _host_is_private(url):
         return {
             "ok": False, "error_type": "forbidden_target",
-            "message": "非浏览器同源请求不允许访问本地/内网地址",
+            "message": "未开启 probe_allow_private（config.json）时不允许访问本地/内网地址",
             "status": None, "latency_ms": 0, "endpoint": _safe_endpoint(url),
             "provider": provider, "model": mdl, "text_ok": None, "vision_ok": None,
         }

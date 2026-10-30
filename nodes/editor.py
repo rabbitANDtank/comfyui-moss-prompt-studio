@@ -14,24 +14,32 @@ try:
     from ..py.translate import (
         AGENT_DEFAULT,
         DEFAULT_AI_DRAFT_PROMPT,
+        POSE_MODES,
         agent_md_widget_options,
+        apply_pose_to_draft,
+        load_agent_md,
         load_config,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
         resolve_endpoint,
+        source_signature,
     )
 except ImportError:  # 兼容非包方式导入
     from py.sniff import sniff
     from py.translate import (
         AGENT_DEFAULT,
         DEFAULT_AI_DRAFT_PROMPT,
+        POSE_MODES,
         agent_md_widget_options,
+        apply_pose_to_draft,
+        load_agent_md,
         load_config,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
         resolve_endpoint,
+        source_signature,
     )
 
 
@@ -57,7 +65,10 @@ class MOSSEditor:
     def IS_CHANGED(cls, source, canvas_width, canvas_height, edits, ai_draft=False,
                    underlay=None, reverse_in=None, replace_edits=True,
                    last_applied_sig="", edits_source_sig="", force_split=False,
-                   **kwargs):
+                   pose_in="", pose_in_2="", pose_mode="自动", apply_pose=-1,
+                   provider="mimo", base_url="", model="", api_key="EMPTY",
+                   temperature=0.3, thinking="off", timeout=180, ai_prompt="",
+                   agent_md=AGENT_DEFAULT, **kwargs):
         import hashlib
 
         if underlay is not None:
@@ -66,16 +77,36 @@ class MOSSEditor:
         # ⚡拆解按钮带 force_split=true：每次点击都要真正执行
         if ai_draft and force_split:
             return float("nan")
+        # 📥姿势按钮带 apply_pose != -1（-2 自动 / >=0 指定目标）：绕过缓存保证 ui 写回必达
+        if isinstance(apply_pose, int) and apply_pose != -1:
+            return float("nan")
+        # LLM 配置与 AGENT.md/config.json 实际内容也要进缓存键（与 Translator 同款）：
+        # 否则改 provider/model/thinking/ai_prompt 后普通 Queue 会命中旧缓存，新配置不生效。
+        try:
+            agent_text = load_agent_md(agent_md)
+        except Exception as e:  # 文件标记错误也要让缓存失效，执行时再报明确错误
+            agent_text = f"ERR:{e}"
+        try:
+            cfg_text = json.dumps(load_config(), sort_keys=True, ensure_ascii=False)
+        except Exception as e:
+            cfg_text = f"ERR:{e}"
         # 缓存键同时纳入 source 和 edits：只哈希 edits 会让“换了 source 但 edits
-        # 非空”命中旧缓存，新散文永远不会被解析。
+        # 非空”命中旧缓存，新散文永远不会被解析。姿势输入同理：换了姿势要让
+        # 普通队列的缓存失效（实际重拆仍需 ⚡拆解，见 pose_in tooltip）。
         payload = json.dumps(
             {
                 "source": source or "", "edits": edits or "",
                 "edits_source_sig": edits_source_sig or "",
                 "canvas_width": canvas_width, "canvas_height": canvas_height,
                 "ai_draft": bool(ai_draft),
+                "pose_in": pose_in or "", "pose_in_2": pose_in_2 or "",
+                "pose_mode": pose_mode or "自动",
+                "provider": provider, "base_url": base_url, "model": model,
+                "api_key": api_key, "temperature": temperature,
+                "thinking": thinking, "timeout": timeout, "ai_prompt": ai_prompt,
+                "agent_md": agent_md, "agent_text": agent_text, "config": cfg_text,
             },
-            ensure_ascii=False, sort_keys=True,
+            ensure_ascii=False, sort_keys=True, default=str,
         )
         return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
@@ -147,6 +178,27 @@ class MOSSEditor:
                     "default": False, "hidden": True, "socketless": True,
                     "tooltip": "内部：⚡拆解按钮提交时强制重新拆解；普通 Queue 不设置，按输入哈希缓存",
                 }),
+                # 姿势注入（v1.7.x）：pose_mode/apply_pose 在前保持 v1.7.0 工作流的
+                # widgets_values 尾部定位不错位；pose_in/pose_in_2 为 v1.7.1 追加的
+                # 可点选/可手填 widget（连线时连线值优先，旧 forceInput 连线依旧生效）
+                "pose_mode": (list(POSE_MODES), {
+                    "default": "自动",
+                    "tooltip": "姿势注入闸门：自动=拆解 LLM 按人数套用（1人→pose_in；2人→双参考分人/双人姿势整体/单人姿势给主角色）；强制双人=散文人数含糊时手动确认按 2 人套用；关闭=忽略姿势输入（免拔线做 A/B 对照）",
+                }),
+                "apply_pose": ("INT", {
+                    "default": -1, "min": -2, "max": 63, "hidden": True, "socketless": True,
+                    "tooltip": "内部：📥姿势 按钮提交时的注入指令。-1=不注入（普通 Queue 默认）；-2=自动分配（双参考按左右、双人姿势给两人、单姿势给最突出角色）；>=0=只注入该下标的角色（画布选中目标）",
+                }),
+                "pose_in": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "姿势参考①：点工具栏 🎯姿势① 选择，或粘贴/连线任意动作描述",
+                    "tooltip": "姿势参考①：点工具栏 🎯姿势① 从图库选（需另装 comfyui-pose-gallery），也可手填动作描述或连线 STRING（如 Pose Gallery.description，连线值优先）。仅 ⚡拆解/📥注入时生效：替代角色 caption 中的动作措辞，服装/外貌/表情保留。双人且填了 pose_in_2 时本输入给 bbox 更靠左的角色；双人姿势则两人整体套用。拆解写回后换姿势需再点 ⚡拆解 或 📥姿势",
+                }),
+                "pose_in_2": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "姿势参考②：双人分别指定时给另一角色，点 🎯姿势② 选择",
+                    "tooltip": "姿势参考②：双人分别指定姿势时给另一角色（与 pose_in 配对）；点 🎯姿势② 选择或手填/连线",
+                }),
             },
         }
 
@@ -155,14 +207,32 @@ class MOSSEditor:
             temperature=0.3, thinking="off", timeout=180, ai_prompt="",
             agent_md=AGENT_DEFAULT, underlay=None, reverse_in=None,
             replace_edits=True, last_applied_sig="", edits_source_sig="",
-            force_split=False):
+            force_split=False, pose_in=None, pose_in_2=None, pose_mode="自动",
+            apply_pose=-1):
         # reverse_in / replace_edits / last_applied_sig 只供前端反推写回使用，后端不参与解析
         # source/edits 优先级：edits 只对写入时的那份 source 生效；换源后以 source 为准。
         text = resolve_editor_text(source, edits, edits_source_sig)
         info = sniff(text, canvas_width, canvas_height)
         ui = {}
 
-        if ai_draft and info["kind"] == "caption":
+        # 📥姿势 本地注入：不调 LLM，把图库描述短语写进已拆解画布的角色 caption，
+        # 注入后过官方 validate_draft 再经 ui.mps_draft 写回（与拆解同一条写回通道）。
+        # apply_pose：-1=不注入（默认）；-2=自动分配；>=0=只注入该下标角色。
+        if isinstance(apply_pose, int) and apply_pose != -1:
+            if info["kind"] != "layout":
+                raise ValueError(
+                    "注入姿势需要拆解完成的画布（layout 形态）；当前输入是散文/caption，请先点 ⚡拆解")
+            info = {"kind": "layout", "draft": apply_pose_to_draft(
+                info["draft"], pose_in or "", pose_in_2 or "",
+                mode=pose_mode or "自动",
+                target_index=(apply_pose if apply_pose >= 0 else -1))}
+            ui["mps_draft"] = json.dumps(info["draft"], ensure_ascii=False, indent=2)
+            # 结果自带 source 归属：前端用它与 currentSourceSig() 比较，判断迟到
+            # 结果是否属于当前 source（P1-3/P1-4），不再只依赖内存里的 pending 槽位。
+            # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
+            ui["mps_src_sig"] = source_signature((source or "").strip())
+
+        elif ai_draft and info["kind"] == "caption":
             cfg = load_config()
             url, mdl = resolve_endpoint(provider, base_url, model, thinking, cfg)
             # 只在目标端点是该 provider 的 config/默认地址时回退配置 key
@@ -173,9 +243,13 @@ class MOSSEditor:
                 base_url=url, api_key=key, model=mdl,
                 temperature=temperature, thinking=thinking, provider=provider,
                 timeout=int(timeout), system_prompt=ai_prompt, agent_md=agent_md,
+                pose_a=pose_in or "", pose_b=pose_in_2 or "",
+                pose_mode=pose_mode or "自动",
             )
             info = {"kind": "layout", "draft": draft}
             ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
+            # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
+            ui["mps_src_sig"] = source_signature((source or "").strip())
 
         out = json.dumps(info["draft"], ensure_ascii=False, indent=2)
         # 与草稿同源的宽高：layout 用草稿尺寸；caption 用本节点 canvas_width/height，
