@@ -164,6 +164,13 @@ custom_nodes/comfyui-moss-prompt-studio/
 
 四个注入口可叠加：`AGENT.md`/`agent_md`（追加持久指令）、`system_prompt`（整体改写契约）、`extra_instructions`（连线逐次指令）、`extra_body`（最后合并请求体）。节点内可直接编辑，具体规则见 tooltip。
 
+## 已知限制与解决方法
+
+- **v1.8.0–v1.8.2：`pose_in`/`costume_in` 无左侧输入口**（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)）。原因：参考输入的原生输入框被整合进节点内「姿势参考/服装参考」双列面板后，ComfyUI 不再渲染对应的输入口，无法连线 Costume/Pose Gallery。**解决方法**：v1.8.x 中请在「姿势参考/服装参考」面板手填（或从图库复制 `description` 文本粘贴），🎯姿势①② 点选不受影响；**升级到 v1.9.0+ 即恢复输入口**，可直接连线。
+- **反推写回会覆盖 source 并重设画布尺寸**：`reverse_in` 写回时以反推结果为准——source 里已有的内容（含手改润色）会被覆盖，画布尺寸会改为反推图的尺寸。需要保留请先复制原文；出图尺寸想固定时可在反推节点填 `canvas_width/canvas_height`（16 的倍数）。
+- **同时注入姿势+服装（散文+LLM 拆解路径）遵循度不稳定**：LLM 可能只采纳其中一个参考甚至都不采纳（实测 0/3 稳定）。**解决方法**：改用 JSON 草稿路径——反推 `draft_zh` 接 source（或先拆解成画布）后用 📥姿势/📥服装 本地注入，为确定性写入，实测 3/3 生效。
+- **手填短姿势句命中率受构图约束**：反推草稿自带"半身近景"等构图描述时，"双手叉腰"这类需要全身景别的姿势可能不可见。**解决方法**：手填时带景别（如"全身，双手叉腰站立"）或改用 🎯图库描述（自带"全身单人"前缀）。
+
 ## 测试
 
 ```bash
