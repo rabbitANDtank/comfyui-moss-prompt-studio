@@ -312,29 +312,13 @@ export function mountEditsSync(ctx) {
 
     if (p.width) setWidgetInput(ctx.wCw, p.width);
     if (p.height) setWidgetInput(ctx.wCh, p.height);
-    // 反推结果的联动（用户规格：三种接法统一为“反推完成 → JSON 画布出现 → 可调可不调 → Queue 出图”）：
-    // - prose（散文）：写 source + 自动开 ai_draft + 自动触发一次拆解 → JSON 画布出现
-    // - draft（layout JSON）：写 source + 自动开 ai_draft，画布直接出现（无需拆解）
-    // - canvas（画布形态）：直接写 edits，画布即现
-    // replace_edits 的手改保护由 reverseDecision 守卫（手改画布时不覆盖）。
-    if (p.mode === "prose") {
-      setAiDraft(true);
-      setWidgetInput(ctx.wSource, p.text);
-      rebuildFromWidgets({ preferEdits: false, write: true });
-      if (M.els && M.els.status) {
-        M.els.status.textContent = "📨 反推散文已写回，AI 拆解已自动开启：正在自动拆解生成 JSON 画布…";
-        M.els.status.className = "mps-status ok";
-      }
-      // 自动触发一次拆解（哑按钮：无 UI 副作用；submitting 互斥照常生效）
-      setTimeout(() => {
-        try { if (fx.runAiSplit) fx.runAiSplit({ disabled: false, textContent: "" }); } catch (e) { /* noop */ }
-      }, 250);
-    } else if (p.mode === "draft") {
-      setAiDraft(true);
+    // 反推结果是“已处理好的输入”，三种形态都关掉自动拆解；prose 由用户手动点 ⚡拆解。
+    // （v1.9.0-beta0 曾实验 prose 自动开 ai_draft + 自动拆解，依作者决定回到 v1.8.0 行为。）
+    setAiDraft(false);
+    if (p.mode === "prose" || p.mode === "draft") {
       setWidgetInput(ctx.wSource, p.text);
       rebuildFromWidgets({ preferEdits: false, write: true });
     } else if (p.mode === "canvas") {
-      setAiDraft(false);
       setWidgetInput(ctx.wEdits, p.text);
       // 解析失败时保留原画布与归属签名，别把旧画布盖成当前 source（P0-1 同类风险）
       if (!rebuildFromEdits(currentSourceSig())) return { ok: false, error: "parse" };
@@ -347,7 +331,7 @@ export function mountEditsSync(ctx) {
     // 记录只存 owner/sig/mode + draftHash（不重复保存整份画布文本，控制工作流体积）
     if (ctx.wSig) setWidgetInput(ctx.wSig, reverseRecord(node.id, p.sig, p.mode, ctx.wEdits ? ctx.wEdits.value : ""));
     fx.updateStatus();
-    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source·已自动拆解" : p.mode === "draft" ? "草稿→source·画布已现" : "画布→edits"}），可调整后 Queue 出图`, "ok");
+    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}），再 Queue 一次完整链路生效`, "ok");
     return { ok: true };
   };
 

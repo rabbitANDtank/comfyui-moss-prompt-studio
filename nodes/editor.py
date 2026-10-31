@@ -178,7 +178,7 @@ class MOSSEditor:
                 }),
                 "reverse_in": ("STRING", {
                     "forceInput": True,
-                    "tooltip": "可选：接 MOSS 图像反推节点的输出；不接时 Editor 照常使用 source/edits。推荐接反推节点的第 3 个输出 canvas_zh（画布草稿 → 直接写回 edits，画布出现可编辑框）；接 draft_zh（第 2 个输出，JSON 草稿）会写入 source 并关闭 ai_draft，接 prose_zh（第 1 个输出，散文）会写入 source。注意：反推结果在本次执行结束后才写回前端，本节点及下游在本次 Queue 中仍使用提交时的旧数据，需要再 Queue 一次完整链路",
+                    "tooltip": "可选：接 MOSS 图像反推节点的输出；不接时 Editor 照常使用 source/edits。推荐接反推节点的第 3 个输出 canvas_zh（画布草稿 → 直接写回 edits，画布出现可编辑框）；接 draft_zh（第 2 个输出，JSON 草稿）会写入 source 并关闭 ai_draft，接 prose_zh（第 1 个输出，散文）会写入 source。注意：反推结果在本次执行结束后才写回前端，本节点及下游在本次 Queue 中仍使用提交时的旧数据，需要再 Queue 一次完整链路。写回会覆盖 source 中的现有内容（含手改），并把画布尺寸设为反推图的尺寸——需要保留请先复制原文",
                 }),
                 "replace_edits": ("BOOLEAN", {
                     "default": True,
