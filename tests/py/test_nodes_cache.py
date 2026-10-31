@@ -22,8 +22,8 @@ from nodes.translator import MOSSTranslator, clear_translation_cache  # noqa: F4
 
 def test_editor_node():
     src = json.dumps(CUP, ensure_ascii=False)
-    out, w, h = MOSSEditor().run(src, 1024, 1024, "")
-    assert json.loads(out) == CUP and (w, h) == (1536, 1024), "layout 宽高输出跟草稿走"
+    out, w, h = MOSSEditor().run(src, 1536, 1024, "")
+    assert json.loads(out) == CUP and (w, h) == (1536, 1024), "canvas 与草稿一致时不缩放"
     # edits 优先（必须带归属签名；换源后以 source 为准）
     edited = json.loads(src); edited["summary"]["caption"] += " 补一句。"
     out2, _, _ = MOSSEditor().run(
@@ -271,13 +271,13 @@ def test_editor_source_signature_priority():
     edited = json.dumps(edited_obj, ensure_ascii=False)
 
     # 签名匹配：edits 优先（画布/手改/拆解结果）
-    out, _, _ = MOSSEditor().run(src, 1024, 1024, edited,
+    out, _, _ = MOSSEditor().run(src, 1536, 1024, edited,
                                  edits_source_sig=source_signature(src))
     assert json.loads(out)["summary"]["caption"].endswith("补一句。")
 
     # 签名不匹配（换源）或缺失：source 优先，旧画布不能遮住新散文
     for sig in (source_signature("另一份 source"), ""):
-        out, _, _ = MOSSEditor().run(src, 1024, 1024, edited, edits_source_sig=sig)
+        out, _, _ = MOSSEditor().run(src, 1536, 1024, edited, edits_source_sig=sig)
         assert json.loads(out) == CUP, f"sig={sig!r} 时应以 source 为准"
 
     # 只有 edits 没有 source：仍用 edits
@@ -372,3 +372,22 @@ def test_editor_legacy_widget_order():
         # v1.8 服装注入：全部追加在姿势控件之后，旧工作流索引不变
         "costume_mode", "apply_costume", "costume_in", "costume_in_2",
     ]
+
+
+def test_editor_layout_rescales_to_canvas_setting():
+    """layout 画布尺寸遵循 Editor 的 canvas 设定（绿框）：draft 尺寸不同时
+    等比重缩放（bbox 同步），出图尺寸与画布一致（v1.9.0-beta0 用户确认语义）。"""
+    d = json.loads(json.dumps(CUP, ensure_ascii=False))  # 1536x1024
+    src = json.dumps(d, ensure_ascii=False)
+    out, w, h = MOSSEditor().run(src, 768, 512, "")      # canvas 减半
+    r = json.loads(out)
+    assert (w, h) == (768, 512), "输出宽高应为 canvas 设定"
+    assert r["width"] == 768 and r["height"] == 512
+    for i, it in enumerate(r["items"]):
+        b0 = d["items"][i]["bbox"]
+        expect = [round(v * 0.5) for v in b0]  # 等比 0.5（_repair_ai_draft 的缩放口径）
+        got = it["bbox"]
+        assert abs(got[0] - expect[0]) <= 1 and abs(got[2] - expect[2]) <= 1,             f"bbox 应等比缩放: {b0} -> {got}"
+    # canvas 与草稿一致时不缩放（回归）
+    out2, w2, h2 = MOSSEditor().run(src, 1536, 1024, "")
+    assert (w2, h2) == (1536, 1024) and json.loads(out2)["items"][0]["bbox"] == d["items"][0]["bbox"]

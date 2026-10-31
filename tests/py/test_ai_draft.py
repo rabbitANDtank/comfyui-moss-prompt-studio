@@ -101,7 +101,7 @@ def test_ai_draft_disabled_and_layout_passthrough():
     out, _, _ = MOSSEditor().run("纯文本。", 1024, 1024, "", ai_draft=False)
     assert json.loads(out) == {"caption": "纯文本。"}
     # 输入已是 layout：ai_draft 不触发 LLM、不产生 ui
-    ret = MOSSEditor().run(json.dumps(CUP, ensure_ascii=False), 1024, 1024, "", ai_draft=True,
+    ret = MOSSEditor().run(json.dumps(CUP, ensure_ascii=False), 1536, 1024, "", ai_draft=True,
                            provider="custom", base_url="http://127.0.0.1:1/v1", model="x",
                            api_key="EMPTY", temperature=0.3, thinking="off", timeout=5, ai_prompt="")
     assert isinstance(ret, tuple) and json.loads(ret[0])["width"] == 1536 and ret[1:] == (1536, 1024)

@@ -22,6 +22,7 @@ try:
         apply_pose_to_draft,
         load_agent_md,
         load_config,
+        _repair_ai_draft,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
@@ -41,6 +42,7 @@ except ImportError:  # 兼容非包方式导入
         apply_pose_to_draft,
         load_agent_md,
         load_config,
+        _repair_ai_draft,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
@@ -301,6 +303,19 @@ class MOSSEditor:
             ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
             # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
             ui["mps_src_sig"] = source_signature((source or "").strip())
+
+        # layout 画布尺寸遵循 Editor 的 canvas_width/canvas_height（工具栏比例/像素选择器）：
+        # 反推/外部带入的 draft 尺寸与此不同时，按目标画布等比重缩放（bbox 同步缩放），
+        # 保证出图尺寸与绿框设定一致（v1.9.0-beta0 用户确认的语义；审查前的行为是 draft 优先）。
+        if info["kind"] == "layout":
+            tw, th = int(canvas_width or 0), int(canvas_height or 0)
+            if tw > 0 and th > 0:
+                tw, th = snap16(tw), snap16(th)
+                if (tw, th) != (int(info["draft"]["width"]), int(info["draft"]["height"])):
+                    draft = _repair_ai_draft(info["draft"], tw, th)
+                    info = {"kind": "layout", "draft": draft}
+                    if "mps_draft" in ui:
+                        ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
 
         out = json.dumps(info["draft"], ensure_ascii=False, indent=2)
         # 与草稿同源的宽高：layout 用草稿尺寸；caption 用本节点 canvas_width/height，
