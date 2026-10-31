@@ -189,9 +189,9 @@ class MOSSImageReverse:
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("prose_zh", "draft_zh", "canvas_zh")
     OUTPUT_TOOLTIPS = (
-        "中文散文，接 Editor.reverse_in → 写入 source（本次执行后写回前端，需再 Queue 一次完整链路）",
-        "中文 layout 草稿 JSON，接 Editor.reverse_in → 写入 source 并关 ai_draft（同样需再 Queue 一次）",
-        "同一份 layout JSON，接 Editor.reverse_in → 写入 edits，画布直接出现（同样需再 Queue 一次）",
+        "输出①：中文散文（整段图像描述）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 写入 source，配合 ai_draft 开启走 LLM 拆解；本次执行后写回前端，需再 Queue 一次完整链路",
+        "输出②：中文 layout 草稿 JSON（带 bbox）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 写入 source 并自动关 ai_draft，直接进翻译/编译；本次执行后写回前端，需再 Queue 一次完整链路",
+        "输出③：同一份 layout JSON（画布形态）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 直接写回 edits，画布立即出现可编辑框（本节点执行完即写回，无需再 Queue）",
     )
     # 可作为输出根（⚡反推 按钮只提交本节点），但 enabled 默认关闭：
     # 未勾选启用时，即使节点完全未连线、被完整 Queue 执行，也不会调用视觉 LLM。
