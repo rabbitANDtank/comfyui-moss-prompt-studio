@@ -202,6 +202,23 @@ def test_apply_costume_removes_overlapping_old_costume_objects():
     assert _bbox_overlap_ratio([0, 0, 10, 10], "bad") == 0
 
 
+def test_apply_costume_never_strips_text_items():
+    """label=text 的画面可见文字（促销横幅等）即使命中服装名词且与角色重叠，
+    也绝不能被旧服装清理误删——静默删除用户内容（v1.9.0-beta0 审查 P1-1）。"""
+    from py.translate import apply_costume_to_draft
+    d = _mk_pose_draft()
+    d["items"] += [
+        # 与右侧大角色重叠、命中服装关键词"鞋"的促销横幅
+        {"label": "text", "caption": "鞋类新品大促销横幅", "text": "鞋类新品大促销",
+         "bbox": [600, 200, 1000, 500]},
+    ]
+    before = len(d["items"])
+    out = apply_costume_to_draft(d, COSTUME_A, "")
+    texts = [it.get("text") for it in out["items"] if it.get("label") == "text"]
+    assert "鞋类新品大促销" in texts, "text 条目不得被旧服装清理删除"
+    assert len(out["items"]) == before
+
+
 def test_editor_costume_inputs_definition():
     opt = MOSSEditor.INPUT_TYPES()["optional"]
     assert opt["costume_in"][1].get("multiline") and opt["costume_in"][1].get("default") == ""

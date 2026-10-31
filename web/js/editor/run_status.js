@@ -16,7 +16,7 @@
 import { app } from "/scripts/app.js";
 import { editorFlushRegistry } from "./comfy-hooks.js";
 import { POSE_MARKER, COSTUME_MARKER } from "./pose.js";
-import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode,
+import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, fallbackTimeoutMs, queueHasNode,
   isDuplicateDraft, resultAttributionDecision } from "./submit_gate.js";
 import { commitDraftWriteback } from "./result_writeback.js";
 import { warnApiKeyIfSet } from "./llm_config.js";
@@ -339,14 +339,18 @@ export function mountRunStatus(ctx) {
     } else {
       M.pendSig = sig;
     }
-    // 拆解/注入按钮卡死硬兜底：180s 仍无结果就解除（applyPose 共用 M.splitAt）。
+    // 拆解/注入按钮卡死硬兜底：超时仍无结果就解除（applyPose 共用 M.splitAt）。
     // v1.9.0-beta0 实测偶发：executed 事件丢失时 submitting 卡 true 而按钮引用已不匹配，
     // 只看按钮引用会永久漏掉——任何 submitting 挂起都必须能被兜底复位（失效时立即解锁）。
+    // 兜底时长取 max(180s, 节点 timeout+30s)：用户可设 timeout 至 1200s，慢 LLM/排队
+    // 不应被 180s 硬兜底误判超时而复位并诱发重复提交（审查 P2-3）。
     const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
-    if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0) })) {
+    const timeoutW = node.widgets && node.widgets.find((x) => x.name === "timeout");
+    if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0), timeoutMs: fallbackTimeoutMs(timeoutW && timeoutW.value) })) {
       fx.resetSplitBtn();
       M.builtSig = M.pendSig = fx.currentSig();
-      M.els.status.textContent = "拆解/注入超时（180s 无结果）：已复位，请检查 LLM 配置后重试";
+      const waitedS = Math.round((Date.now() - (M.splitAt || 0)) / 1000);
+      M.els.status.textContent = `拆解/注入超时（${waitedS}s 无结果）：已复位，请检查 LLM 配置后重试`;
       M.els.status.className = "mps-status err";
     }
   }, 700);

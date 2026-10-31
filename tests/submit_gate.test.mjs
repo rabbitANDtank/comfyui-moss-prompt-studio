@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode,
+  queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, fallbackTimeoutMs, queueHasNode,
   isDuplicateDraft, resultAttributionDecision,
 } from "../web/js/editor/submit_gate.js";
 
@@ -144,4 +144,14 @@ test("isDuplicateDraft distinguishes dual-channel replay from two real submissio
   assert.equal(isDuplicateDraft({ ...base, text: "OTHER" }), false);
   assert.equal(isDuplicateDraft({ ...base, now: 4000 }), false, "超出 2s 窗口");
   assert.equal(isDuplicateDraft({ ...base, text: "" }), false, "空结果不做重复判定");
+});
+
+test("fallbackTimeoutMs covers user-configurable timeout (review P2-3)", () => {
+  assert.equal(fallbackTimeoutMs(undefined), 210000, "缺省按 180s+30s");
+  assert.equal(fallbackTimeoutMs(180), 210000);
+  assert.equal(fallbackTimeoutMs(600), 630000, "用户 timeout=600s 时兜底应随之放宽");
+  assert.equal(fallbackTimeoutMs(1200), 1230000, "最大档 1200s");
+  assert.equal(fallbackTimeoutMs(0), 210000, "0/负数/非数回落默认");
+  assert.equal(fallbackTimeoutMs("abc"), 210000);
+  assert.equal(fallbackTimeoutMs(-5), 210000);
 });

@@ -24,6 +24,14 @@ export function shouldResetOnTimeout({ hasPending, elapsedMs, timeoutMs = 180000
   return !!hasPending && Number(elapsedMs) > timeoutMs;
 }
 
+/** 兜底时长：max(180s, 节点 timeout + 30s)。
+ * 用户可把 LLM timeout 设到 1200s，慢 LLM/排队等待不应被 180s 硬兜底误判为超时
+ * 而复位按钮、诱发重复提交与双倍计费（v1.9.0-beta0 审查 P2-3）。 */
+export function fallbackTimeoutMs(timeoutWidget) {
+  const sec = Number(timeoutWidget);
+  return Math.max(180000, (Number.isFinite(sec) && sec > 0 ? sec : 180) * 1000 + 30000);
+}
+
 /** /queue 条目形如 [number, prompt_id, prompt, extra_data, outputs]（server.py 截到 5 项）。
  * 判断某个节点 id 是否在 prompt 对象里；不能取 item[1]（那是 prompt_id 字符串）。 */
 export function queueHasNode(entries, nodeId) {

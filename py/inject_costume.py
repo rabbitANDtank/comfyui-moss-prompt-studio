@@ -144,6 +144,8 @@ def _strip_old_costume_objects(items: list, char_indices) -> int:
 
     只处理非 character、caption 命中服装名词、且 bbox 至少 30% 落在角色框内的
     条目；不重叠的场景服装（如橱窗里的裙子）与背景/配饰不受影响。
+    label=text 的条目永不删除：画面可见文字（促销横幅等）即使命中服装名词
+    （如"鞋类大促销"）也是用户内容，静默删除等于丢稿（v1.9.0-beta0 审查 P1-1）。
     """
     drop = set()
     for ci in char_indices:
@@ -153,7 +155,7 @@ def _strip_old_costume_objects(items: list, char_indices) -> int:
         for j, it in enumerate(items):
             if j == ci or j in drop or not isinstance(it, dict):
                 continue
-            if it.get("label") == "character":
+            if it.get("label") == "character" or it.get("label") == "text":
                 continue
             cap = str(it.get("caption") or "")
             if not any(k in cap for k in _COSTUME_OBJECT_KEYWORDS):
