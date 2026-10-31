@@ -247,7 +247,7 @@ class MOSSEditor:
             replace_edits=True, last_applied_sig="", edits_source_sig="",
             force_split=False, pose_in=None, pose_in_2=None, pose_mode="自动",
             apply_pose=-1, costume_in=None, costume_in_2=None, costume_mode="自动",
-            apply_costume=-1):
+            apply_costume=-1, unique_id=None):
         # reverse_in / replace_edits / last_applied_sig 只供前端反推写回使用，后端不参与解析
         # source/edits 优先级：edits 只对写入时的那份 source 生效；换源后以 source 为准。
         text = resolve_editor_text(source, edits, edits_source_sig)
@@ -326,7 +326,7 @@ class MOSSEditor:
             out_w, out_h = snap16(canvas_width), snap16(canvas_height)
 
         if underlay is not None:
-            img = _save_underlay(underlay)
+            img = _save_underlay(underlay, unique_id)
             if img is not None:
                 ui.setdefault("images", []).append(img)
         if ui:
@@ -334,7 +334,7 @@ class MOSSEditor:
         return (out, out_w, out_h)
 
 
-def _save_underlay(images):
+def _save_underlay(images, unique_id=None):
     """把 underlay 张量存成 temp PNG，供前端 /view 拉取。失败不阻塞节点。"""
     try:
         import os
@@ -348,7 +348,7 @@ def _save_underlay(images):
         img = Image.fromarray(arr)
         # 长边压到 1800，控制 data 体积
         img.thumbnail((1800, 1800))
-        name = f"moss_underlay_{unique_id}.png"  # 每节点固定名覆盖写，temp 不随连跑增长
+        name = f"moss_underlay_{unique_id or int(time.time() * 1000)}.png"  # 每节点固定名覆盖写，temp 不随连跑增长
         img.save(os.path.join(folder_paths.get_temp_directory(), name))
         return {"filename": name, "subfolder": "", "type": "temp"}
     except Exception:
