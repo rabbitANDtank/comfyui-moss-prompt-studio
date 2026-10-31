@@ -135,7 +135,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 **不接时 Editor / Translator / Compiler 与旧版行为完全一致**。需要姿势控制时：
 
 1. 用 ComfyUI Manager 或按其 README 安装 [comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery) 到 `custom_nodes/`，重启 ComfyUI（本地中文姿势图库）；本插件只消费其 `description` 文本输出，不分发其图片/索引。
-2. 接法：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。`pose_in`/`pose_in_2` 也支持手填和 🎯 点选（连线优先）。`pose_mode` 默认 `自动`。注意：**📥姿势 只替换 caption 末尾的姿势分段，不清理正文里的旧动作词**（反推画布常见"她双手叉腰站在…"式内联描写）——出现矛盾措辞时请用 ⚡拆解 彻底替换。**v1.8.x 节点左侧暂无 pose 输入口**（见顶部已知限制），请先在「姿势参考」面板手填或 🎯 点选。
+2. 接法：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。`pose_in`/`pose_in_2` 也支持手填和 🎯 点选（连线优先）。`pose_mode` 默认 `自动`。注意：**📥姿势 只替换 caption 末尾的姿势分段，不清理正文里的旧动作词**（反推画布常见"她双手叉腰站在…"式内联描写）——出现矛盾措辞时请用 ⚡拆解 彻底替换。
 3. 两种注入：**⚡拆解**（LLM 展开姿势，一次 LLM 调用）与 **📥姿势**（本地短语版，拆解后免费秒注入）；`pose_mode` 控制自动/强制双人/关闭；检查器可「🔄 对调两人姿势」。
 4. 文字姿势约束弱于深度图，效果受模型影响；复杂姿势建议 ⚡拆解 + `thinking=low`，骨骼级控制请走 pose-gallery 的深度链路。具体控件与注入规则以节点 tooltip 为准。
 
@@ -146,7 +146,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 **不接时 Editor / Translator / Compiler 与旧版行为完全一致**。需要服装控制时：
 
 1. 按 [comfyui-costume-gallery](https://github.com/wangweihong/comfyui-costume-gallery) 的 README 安装到 `custom_nodes/`，重启 ComfyUI。**该节点没有输出级惰性：即使只接 `description`，每次执行也会解码 PNG，`VALIDATE_INPUTS` 还要求原图存在**，因此必须安装完整图库（约 **1.42 GiB**，其中 `library/png/` 约 1.33 GiB）；不能只装索引。
-2. 接法：`Costume Gallery.description → Editor.costume_in`；双人时再接第二个 Costume Gallery 的 `description → costume_in_2`。`costume_in`/`costume_in_2` 也支持手填（连线优先）。`costume_mode` 默认 `自动`，可选 `关闭` 做 A/B 对照。**v1.8.x 节点左侧暂无 costume 输入口**（见顶部已知限制），请先在「服装参考」面板手填：在 Costume Gallery 自带图库选中服装后复制 `description` 文本粘贴过来。
+2. 接法：`Costume Gallery.description → Editor.costume_in`；双人时再接第二个 Costume Gallery 的 `description → costume_in_2`。`costume_in`/`costume_in_2` 也支持手填（连线优先）。`costume_mode` 默认 `自动`，可选 `关闭` 做 A/B 对照。也可在「服装参考」面板手填：在 Costume Gallery 自带图库选中服装后复制 `description` 文本粘贴过来。
 3. 两种注入：**⚡拆解**（LLM 把关键词展开成完整服装描述，一次 LLM 调用）与 **📥服装**（本地短语版：`分类 / 关键词…` → `身穿…`，拆解后免费秒注入）；检查器可「🔄 对调两人服装」，与「对调两人姿势」互不影响。
    - **📥服装会移除与目标角色重叠的旧服装 `object` 条目**（反推草稿常把旧连衣裙/网袜单独拆成 object，不移除会被画回去）；不重叠的场景服装（橱窗里的裙子）与背景/配饰不受影响。
    - **注意混合**：📥服装只追加「；服装：」段；若画布 `summary`/角色描述里已写有旧衣服（反推草稿尤其常见），模型可能新旧混穿。检测到旧服装措辞时状态行会给出 ⚠；要彻底替换请用 ⚡拆解（LLM 会改写 summary 与角色服装）。
