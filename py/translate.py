@@ -327,6 +327,11 @@ def translate(src_info: dict, *, base_url: str, api_key: str, body: dict,
                        tag=f"translate attempt={attempt + 1}/{1 + MAX_RETRY}")
             last_raw = raw
             out = extract_json(raw)
+            if isinstance(out, dict) and "meta" in out and isinstance(out.get("summary"), dict) \
+                    and "meta" not in out["summary"]:
+                # LLM 常见手误：把 summary.meta 写到顶层（与拆解路径的容错同类）；
+                # 挪回 summary 后直接过校验，省一次无谓重试。
+                out["summary"]["meta"] = out.pop("meta")
             return check_translation(src_info, out)
         except PermanentError:
             raise

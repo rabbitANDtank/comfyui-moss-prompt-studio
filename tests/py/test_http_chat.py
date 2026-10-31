@@ -39,6 +39,22 @@ def test_http_retry_success():
         srv.shutdown()
 
 
+def test_translate_tolerates_top_level_meta():
+    """LLM 把 summary.meta 写到顶层：翻译侧容错挪回 summary（与拆解路径容错对齐），
+    一次通过，不再浪费 3 次重试（v1.9.0-beta0 真机踩坑）。"""
+    srv = _start_mock()
+    try:
+        bad = json.loads(json.dumps(GOOD_EN, ensure_ascii=False))
+        bad["meta"] = bad["summary"].pop("meta")
+        MockHandler.queue = [json.dumps(bad, ensure_ascii=False)]
+        (out,) = _run_translator(f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        assert json.loads(out) == GOOD_EN and MockHandler.hits == 1, \
+            "顶层 meta 应被挪回 summary 并一次通过校验"
+    finally:
+        srv.shutdown()
+        srv.shutdown()
+
+
 def test_http_fail_after_retries():
     srv = _start_mock()
     try:
