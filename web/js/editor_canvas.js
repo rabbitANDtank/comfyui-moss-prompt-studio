@@ -14,6 +14,7 @@ import {
   detectKind, reverseCompiled, validateDraft as validateJS,
   parseSourceText, snapshotOf, serializeDraft,
   clampDim, clampArea, clampBox, csvParse, csvShow, sourceSignature, fitCanvasDisplay,
+  normalizeIntWidget,
 } from "./editor/model.js";
 import { editorFlushRegistry, mountEditorLifecycle, mountCompilerSync } from "./editor/comfy-hooks.js";
 import { parseReverseRecord, reverseDecision, reverseRecord, textHash } from "./editor/reverse.js";
@@ -23,15 +24,18 @@ import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasN
 import { commitDraftWriteback } from "./editor/result_writeback.js";
 import { flushFocusedField } from "./editor/focus_guard.js";
 import { bindPointerDrag } from "./editor/pointer_drag.js";
-import { POSE_MARKER, poseMarkedItems, swapPoseSegments, buildSplitPayload,
+import { POSE_MARKER, COSTUME_MARKER, poseMarkedItems, costumeMarkedItems,
+  swapPoseSegments, swapCostumeSegments, buildSplitPayload,
   normalizePoseMode, normalizeApplyPose, normalizePoseText, resolvePoseSource,
-  poseSourceLabel, poseWriteTarget, poseSourceWritable } from "./editor/pose.js";
+  normalizeCostumeMode, normalizeApplyCostume, normalizeCostumeText,
+  costumeIsSensitive, textMentionsCostume, poseSourceLabel, poseWriteTarget,
+  poseSourceWritable } from "./editor/pose.js";
 import { buildFacets, filterPoses, groupByPose, toDescription, poseThumbUrl } from "./editor/pose_picker.js";
 import { listTemplates } from "./editor/templates.js";
 import { estimateTextFit, estimatePromptTokens, lintTextItems, TOKEN_WARN_LIMIT } from "./editor/text_fit.js";
 import { syncLlmConfig, warnApiKeyIfSet, bindApiKeyWarn } from "./editor/llm_config.js";
 import { mountLlmOptions } from "./editor/llm_options.js";
-import { mountPoseInputs } from "./editor/pose_inputs.js";
+import { mountPoseInputs, mountCostumeInputs } from "./editor/pose_inputs.js";
 
 console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
 
@@ -58,12 +62,18 @@ function sanitizeAgentMd(node) {
 
 const CSS = `
 .mps-root{display:flex;flex-direction:column;gap:6px;font-family:system-ui,'Segoe UI',sans-serif;color:#ddd;font-size:12px;user-select:none;width:100%;}
-.mps-toolbar{display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#232323;border:1px solid #3a3a3a;border-radius:6px;padding:6px;}
+.mps-toolbar{display:flex;flex-direction:column;gap:4px;background:#232323;border:1px solid #3a3a3a;border-radius:6px;padding:6px;}
 .mps-toolbar button{background:#333;color:#eee;border:1px solid #4a4a4a;border-radius:4px;padding:3px 8px;cursor:pointer;font-size:12px;}
 .mps-toolbar button:hover:not(:disabled){background:#454545;}
 .mps-toolbar button:disabled{opacity:.4;cursor:default;}
 .mps-toolbar select{background:#2a2a2a;color:#eee;border:1px solid #4a4a4a;border-radius:4px;padding:2px 4px;}
 .mps-toolbar select.mps-size{min-width:88px;flex:0 0 auto;}
+/* ⚡拆解 主按钮：更大更亮，与普通按钮（灰）一眼区分；蓝降饱和避免刺眼 */
+.mps-toolbar button.mps-primary{background:#3d6b9e;border-color:#5580ad;color:#fff;font-size:13px;padding:5px 14px;letter-spacing:.5px;}
+.mps-toolbar button.mps-primary:hover:not(:disabled){background:#4d7cae;}
+/* 工具栏固定两行：第一行 编辑工具+右端 ⇄同步/⧉复制；第二行 注入/模板+右端 ⚡拆解（正对同步/复制下方） */
+.mps-toolbar .mps-tb-line{display:flex;flex-wrap:wrap;gap:5px;align-items:center;}
+.mps-toolbar .mps-tb-end{margin-left:auto;display:flex;gap:5px;align-items:center;}
 .mps-toolbar .mps-chk{display:flex;align-items:center;gap:3px;color:#bbb;}
 .mps-toolbar .mps-spacer{flex:1;}
 .mps-main{display:flex;gap:6px;align-items:stretch;flex:1 1 auto;min-height:0;}
@@ -159,8 +169,8 @@ function init(node) {
     bindEditsWidget();
     return !!(wSource && wEdits && wCw && wCh);
   };
-  // 旧工作流缓存的姿势 widget 可能是 ""/null（widgets_values 错位或新控件缺省）：
-  // 服务端会直接拒绝 pose_mode="" 与 apply_pose=""，这里在 configure/轮询时静默修回默认值。
+  // 旧工作流缓存的姿势/服装 widget 可能是 ""/null（widgets_values 错位或新控件缺省）：
+  // 服务端会直接拒绝 pose_mode=""、apply_pose="" 等，这里在 configure/轮询时静默修回默认值。
   function normalizePoseWidgets() {
     const fix = (w, v) => {
       if (!w || w.value === v) return;
@@ -173,6 +183,17 @@ function init(node) {
     if (wApply) fix(wApply, normalizeApplyPose(wApply.value));
     if (wPose) fix(wPose, normalizePoseText(wPose.value));
     if (wPose2) fix(wPose2, normalizePoseText(wPose2.value));
+    const wCMode = W("costume_mode"), wCApply = W("apply_costume");
+    const wCost = W("costume_in"), wCost2 = W("costume_in_2");
+    if (wCMode) fix(wCMode, normalizeCostumeMode(wCMode.value));
+    if (wCApply) fix(wCApply, normalizeApplyCostume(wCApply.value));
+    if (wCost) fix(wCost, normalizeCostumeText(wCost.value));
+    if (wCost2) fix(wCost2, normalizeCostumeText(wCost2.value));
+    // 画布宽高同理：≤v1.7.2 工作流错位可能把 INT 读成字符串，服务端会拒整次提交
+    for (const nm of ["canvas_width", "canvas_height"]) {
+      const w = W(nm);
+      if (w) fix(w, normalizeIntWidget(w.value));
+    }
   }
   // 旧工作流缓存的新增 widget 可能是 ""，不是布尔；按“未设置”处理为默认开
   function normalizeReplaceEdits() {
@@ -186,10 +207,12 @@ function init(node) {
   sanitizeAgentMd(node);
   // LLM/AI 配置改成独立双列 DOM 面板；原 widget 隐藏但仍参与序列化。
   try { mountLlmOptions(node); } catch (e) { console.warn("[MOSS Studio] LLM 选项面板挂载失败", e); }
-  // 两个姿势参考框同样改为双列 DOM 面板，带原生 resize 手柄。
+  // 两个姿势参考框同样改为双列 DOM 面板，带原生 resize 手柄；服装参考面板紧随其后。
   try { mountPoseInputs(node); } catch (e) { console.warn("[MOSS Studio] 姿势参考面板挂载失败", e); }
+  try { mountCostumeInputs(node); } catch (e) { console.warn("[MOSS Studio] 服装参考面板挂载失败", e); }
 
-  if (node.size[0] < 860 || node.size[1] < 900) node.size = [Math.max(node.size[0], 860), Math.max(node.size[1], 900)];
+  // 姿势 + 服装两组参考面板各约 96px：最小高度比 v1.7.2 增加 100px
+  if (node.size[0] < 860 || node.size[1] < 1000) node.size = [Math.max(node.size[0], 860), Math.max(node.size[1], 1000)];
 
   // 文本框：不锁高度，允许用户拖右下角自由调整；手动调整后的高度优先于前端自动高度
   const userH = {};
@@ -220,16 +243,23 @@ function init(node) {
 
   const toolbar = document.createElement("div");
   toolbar.className = "mps-toolbar";
-  const mkBtn = (txt, fn, title) => {
+  // 两行工具栏：第一行 编辑工具 + 右端 ⇄同步/⧉复制；第二行 注入/模板 + 右端 ⚡拆解
+  // （拆解正好在 同步/复制 正下方；两行各自内部换行，互不错位）
+  const tbLine1 = document.createElement("div");
+  tbLine1.className = "mps-tb-line";
+  const tbLine2 = document.createElement("div");
+  tbLine2.className = "mps-tb-line";
+  toolbar.append(tbLine1, tbLine2);
+  const mkBtn = (txt, fn, title, parent = tbLine1) => {
     const b = document.createElement("button");
     b.textContent = txt; if (title) b.title = title;
     b.addEventListener("click", fn);
-    toolbar.appendChild(b);
+    parent.appendChild(b);
     return b;
   };
   const btnUndo = mkBtn("↩撤销", () => doUndo(), "Ctrl+Z");
   const btnRedo = mkBtn("↪重做", () => doRedo(), "Ctrl+Y");
-  const sep = () => { const s = document.createElement("span"); s.textContent = "·"; s.style.opacity = "0.4"; toolbar.appendChild(s); };
+  const sep = (parent = tbLine1) => { const s = document.createElement("span"); s.textContent = "·"; s.style.opacity = "0.4"; parent.appendChild(s); };
   sep();
   mkBtn("+物体", () => addItem("object"));
   mkBtn("+人物", () => addItem("character"));
@@ -248,48 +278,59 @@ function init(node) {
     selRatio.value = "";
     refreshSizeSelectors();
   });
-  toolbar.appendChild(selRatio);
+  tbLine1.appendChild(selRatio);
   const selMP = document.createElement("select");
   selMP.className = "mps-size";
   selMP.appendChild(new Option("像素…", ""));
   MP_OPTS.forEach(([v, t]) => selMP.appendChild(new Option(t, v)));
   selMP.title = "换像素规模（百万像素），保持当前比例（当前值显示在框上）；官方范围 0.25M–4M，推荐 1M/1.5M/2M";
   selMP.addEventListener("change", () => { applyResize(null, selMP.value); selMP.value = ""; refreshSizeSelectors(); });
-  toolbar.appendChild(selMP);
+  tbLine1.appendChild(selMP);
   const snapChk = document.createElement("input");
   snapChk.type = "checkbox"; snapChk.checked = true; snapChk.id = "mps-snap-" + node.id;
   const snapLbl = document.createElement("label");
   snapLbl.className = "mps-chk"; snapLbl.htmlFor = snapChk.id; snapLbl.textContent = "16吸附";
   snapLbl.prepend(snapChk);
-  toolbar.appendChild(snapLbl);
+  tbLine1.appendChild(snapLbl);
   const undChk = document.createElement("input");
   undChk.type = "checkbox"; undChk.checked = false;
   const undLbl = document.createElement("label");
   undLbl.className = "mps-chk"; undLbl.textContent = "底图"; undLbl.prepend(undChk);
-  toolbar.appendChild(undLbl);
-  const spacer = document.createElement("span");
-  spacer.className = "mps-spacer";
-  toolbar.appendChild(spacer);
+  tbLine1.appendChild(undLbl);
   // LLM 配置同步：把当前节点的连接配置复制到另外两个 MOSS LLM 节点（不含 api_key）
-  mkBtn("⇄同步", () => {
+  const btnSync = mkBtn("⇄同步", () => {
     const n = syncLlmConfig(node, app.graph, app);
     cfgNotify(`已同步 LLM 连接配置（不含 api_key）到另外 ${n} 个节点`);
   }, "把当前 provider/base_url/model/temperature/thinking/timeout 复制到另外两个 MOSS 节点；api_key 不复制（会随工作流明文保存，建议放 config.json）");
   const btnCopy = mkBtn("⧉复制", async () => {
     try { await navigator.clipboard.writeText(wEdits.value || ""); btnCopy.textContent = "已复制"; setTimeout(() => (btnCopy.textContent = "⧉复制"), 1200); } catch (e) { /* noop */ }
   }, "复制编辑后的草稿 JSON");
-  // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布
+  // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布。
+  // 最常用入口：主色（降饱和蓝）+加大，排在第二行最右、⇄同步/⧉复制 正下方。
   const btnSplit = mkBtn("⚡拆解", () => runAiSplit(btnSplit), "把 source 散文拆解为布局草稿（只执行本节点，不跑整个工作流）");
+  btnSplit.classList.add("mps-primary");
+  // 第一行右端：⇄同步 / ⧉复制（与 ↩撤销/+物体/+人物 那一排横向对齐）
+  const tbUtil = document.createElement("div");
+  tbUtil.className = "mps-tb-end";
+  tbUtil.append(btnSync, btnCopy);
+  tbLine1.appendChild(tbUtil);
   // 📥姿势：把 pose_in/pose_in_2 的图库姿势短语本地注入已拆解画布的角色 caption
   // （不调 LLM、免费秒完成；要 LLM 展开的丰富动作描述走 ⚡拆解 路径）
-  const btnPose = mkBtn("📥姿势", () => applyPose(btnPose), "把姿势参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、双人姿势给两人、单姿势给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销");
+  const btnPose = mkBtn("📥姿势", () => applyPose(btnPose), "把姿势参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、双人姿势给两人、单姿势给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销", tbLine2);
+  // 📥服装：把 costume_in/costume_in_2 的服装短语本地注入角色 caption（不调 LLM）
+  const btnCostume = mkBtn("📥服装", () => applyCostume(btnCostume), "把服装参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、单参考给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销", tbLine2);
   // 🎯姿势①/②：从图库点选姿势（体系/分类/视角筛选 + 关键词搜索），写入 pose_in widget
-  mkBtn("🎯姿势①", () => openPosePicker(1), "打开姿势库点选面板（需已安装 comfyui-pose-gallery）：按体系/分类/视角筛选或搜索，点视角按钮选用，写入 pose_in。也可在 widget 里手填或连线");
-  mkBtn("🎯姿势②", () => openPosePicker(2), "同 🎯姿势①，写入 pose_in_2（双人分别指定姿势时给另一角色）");
+  mkBtn("🎯姿势①", () => openPosePicker(1), "打开姿势库点选面板（需已安装 comfyui-pose-gallery）：按体系/分类/视角筛选或搜索，点视角按钮选用，写入 pose_in。也可在 widget 里手填或连线", tbLine2);
+  mkBtn("🎯姿势②", () => openPosePicker(2), "同 🎯姿势①，写入 pose_in_2（双人分别指定姿势时给另一角色）", tbLine2);
   // 📐模板：内置自建版式（官方 draft schema），载入后走 adoptEdits 写回并保留撤销点
-  mkBtn("📐模板", () => openTemplatePanel(), "打开内置版式模板库（自建示例版式）：竖版海报/方形社媒/电商主图/杂志封面/人物介绍卡/四格分镜。载入会写入编辑画布，可 ↶撤销");
+  mkBtn("📐模板", () => openTemplatePanel(), "打开内置版式模板库（自建示例版式）：竖版海报/方形社媒/电商主图/杂志封面/人物介绍卡/四格分镜。载入会写入编辑画布，可 ↶撤销", tbLine2);
   mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); },
-    "重置为 source 粘贴源：丢弃当前画布编辑并清空 edits（会二次确认；不能用 ↶撤销 恢复）");
+    "重置为 source 粘贴源：丢弃当前画布编辑并清空 edits（会二次确认；不能用 ↶撤销 恢复）", tbLine2);
+  // 第二行右端：⚡拆解（在 ⇄同步/⧉复制 正下方、右对齐）
+  const tbSplit = document.createElement("div");
+  tbSplit.className = "mps-tb-end";
+  tbSplit.appendChild(btnSplit);
+  tbLine2.appendChild(tbSplit);
 
   const main = document.createElement("div");
   main.className = "mps-main";
@@ -406,12 +447,13 @@ function init(node) {
     els: { canvasWrap, canvas, underlay, undChk, capBox, msg, layers, insp, overlap, status, runStatus, snapChk, btnUndo, btnRedo, btnDel, pnlLayers, pnlInsp, pnlOv },
     builtSig: null, pendSig: null, timer: null, wt: null,
     editsDirty: false, editsCb: null, writingEdits: false,
-    // source 归属（P0-1）：stateSrcSig=当前画布对应的 source 签名；split/pose/queueSrcSig=
+    // source 归属（P0-1）：stateSrcSig=当前画布对应的 source 签名；split/pose/costume/queueSrcSig=
     // 已提交但尚未回来的异步结果对应的 source 签名；lastDraft*=双通道去重。
-    stateSrcSig: "", splitSrcSig: "", poseSrcSig: "", queueSrcSig: "",
+    stateSrcSig: "", splitSrcSig: "", poseSrcSig: "", costumeSrcSig: "", queueSrcSig: "",
     lastDraftText: "", lastDraftAt: 0, lastDraftPid: "",
-    // F3/F4：提交互斥 / 最近一次拆解-注入的 prompt_id / 资源句柄
-    submitting: false, lastSubmitId: "", poseLinkWarned: false,
+    // F3/F4：提交互斥 / 最近一次拆解-注入的 prompt_id / 资源句柄。
+    // submitSeq/submitPrevId：本地注入结果可能先于 /prompt 响应到达（见 submit_gate）。
+    submitting: false, lastSubmitId: "", submitPrevId: "", submitSeq: 0, poseLinkWarned: false,
     queueTimer: null, ro: null,
   });
 
@@ -1080,10 +1122,21 @@ function init(node) {
       const sw = document.createElement("button");
       sw.className = "mps-mini"; sw.style.marginTop = "6px";
       sw.textContent = "🔄 对调两人姿势";
-      sw.title = "交换两个角色 caption 末尾「" + POSE_MARKER + "…」段（拆解时由姿势参考生成）";
+      sw.title = "交换两个角色 caption 末尾「" + POSE_MARKER + "…」段（拆解时由姿势参考生成）；服装段保持不动";
       sw.addEventListener("click", () => {
         pushUndo(snapshot());
         if (swapPoseSegments(d)) afterChange();
+      });
+      insp.appendChild(sw);
+    }
+    if (it.label === "character" && costumeMarkedItems(d).length === 2) {
+      const sw = document.createElement("button");
+      sw.className = "mps-mini"; sw.style.marginTop = "6px";
+      sw.textContent = "🔄 对调两人服装";
+      sw.title = "交换两个角色 caption 末尾「" + COSTUME_MARKER + "…」段（拆解/📥服装时由服装参考生成）；姿势段保持不动";
+      sw.addEventListener("click", () => {
+        pushUndo(snapshot());
+        if (swapCostumeSegments(d)) afterChange();
       });
       insp.appendChild(sw);
     }
@@ -1518,8 +1571,8 @@ function init(node) {
     // 工作流恢复时 configure 先还原 widget 值再调 onConfigure：这里必须从 edits 重建，
     // 否则 700ms 轮询会用 source 覆盖掉保存的布局（AI 拆解/画布编辑丢失）。
     onConfigure: function () {
-      if (this.size[0] < 860 || this.size[1] < 900) {
-        this.size = [Math.max(this.size[0], 860), Math.max(this.size[1], 900)];
+      if (this.size[0] < 860 || this.size[1] < 1000) {
+        this.size = [Math.max(this.size[0], 860), Math.max(this.size[1], 1000)];
       }
       sanitizeAgentMd(this);
       rebindWidgets();
@@ -1528,13 +1581,17 @@ function init(node) {
         node._mpsLlmOptions?.refresh();
         node._mpsPoseInputs?.hideWidgets();
         node._mpsPoseInputs?.refresh();
+        node._mpsCostumeInputs?.hideWidgets();
+        node._mpsCostumeInputs?.refresh();
       } catch (e) { /* noop */ }
       try { warnApiKeyIfSet(node, showKeyWarn); } catch (e) { /* noop */ }
       // 工作流切换/重新 configure 兜底：清掉可能卡住的提交状态（F2）
       resetSplitBtn();
       M.submitting = false;
       M.posePendingAt = 0;
+      M.costumePendingAt = 0;
       M.splitPendingAt = 0;
+      M.submitPrevId = "";
       M.queueSrcSig = "";
       rebuildFromWidgets({ preferEdits: true, write: false });
     },
@@ -1583,19 +1640,26 @@ function init(node) {
         // 结果归属（F3/P1）：后端回传 mps_src_sig 时严格比较；新前端事件带
         // prompt_id 时还必须匹配最近一次手工提交（完整 Queue/旧提交的结果丢弃）。
         const curSig = currentSourceSig();
-        const pendingSig = M.poseBtn ? M.poseSrcSig : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig);
+        const pendingSig = M.poseBtn ? M.poseSrcSig
+          : (M.costumeBtn ? M.costumeSrcSig
+            : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig));
         const uiSrcSig = Array.isArray(data.mps_src_sig) ? data.mps_src_sig.join("") : data.mps_src_sig;
         const decision = resultAttributionDecision({
           promptId: meta.promptId,
           lastSubmitId: M.lastSubmitId,
+          previousSubmitId: M.submitPrevId,
           uiSig: uiSrcSig,
           currentSig: curSig,
           pendingSig,
           duplicate: dupDraft,
         });
-        // 本次结果是否为 📥姿势 注入：必须在 resetSplitBtn 清掉按钮前判断（F5）
+        // 本次结果是否为 📥姿势/📥服装 注入：必须在 resetSplitBtn 清掉按钮前判断（F5）
         const isPoseResult = !!M.poseBtn
           || (!!M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt);
+        const isCostumeResult = !!M.costumeBtn
+          || (!!M.costumePendingAt && Date.now() - M.costumePendingAt < 30000
+            && !M.splitPendingAt && !isPoseResult);
+        const isInjectResult = isPoseResult || isCostumeResult;
         // P1：结果到达（含重复/过期）就结束本次提交等待；否则 M.submitting 会一直
         // 否决 Queue/Ctrl+Enter 直到 180s 兜底。去重只决定是否再次写回画布。
         if (decision.resetPending) resetSplitBtn();
@@ -1607,7 +1671,8 @@ function init(node) {
             rememberRun("⚠ 收到不属于最近一次提交的结果，已丢弃；仍在等待本次提交", "err");
           }
         } else if (decision.outcome === "stale") {
-          M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
+          M.posePendingAt = 0; M.costumePendingAt = 0;
+          M.splitPendingAt = 0; M.posePairHint = false;
           // 当前 source 的有效画布不能被丢掉：preferEdits=true 先尝试 owner 匹配的 edits；
           // 只有全部候选解析失败时才按原逻辑清理旧 edits（F8）
           try { rebuildFromWidgets({ preferEdits: true }); } catch (e) { /* noop */ }
@@ -1623,11 +1688,11 @@ function init(node) {
               if (wEdits.inputEl) wEdits.inputEl.value = v;
             },
             rebuild: () => {
-              // 📥姿势 结果支持 ↶撤销：先记录注入前画布；拆解/换源仍清空 undo（F5）
-              if (isPoseResult && M.S) {
+              // 📥姿势/📥服装 结果支持 ↶撤销：先记录注入前画布；拆解/换源仍清空 undo（F5）
+              if (isInjectResult && M.S) {
                 try { pushUndo(snapshot()); } catch (e) { /* noop */ }
               }
-              return rebuildFromEdits(curSig, { keepUndo: isPoseResult });
+              return rebuildFromEdits(curSig, { keepUndo: isInjectResult });
             },
           });
           if (!written.ok) {
@@ -1638,7 +1703,7 @@ function init(node) {
             try { reportDraftArrived(written.draft); } catch (e) { /* 状态提示尽力而为 */ }
           }
         }
-      } else if (M.submitting || M.splitBtn || M.poseBtn) {
+      } else if (M.submitting || M.splitBtn || M.poseBtn || M.costumeBtn) {
         // 空草稿同样是“结果到达”：复位提交状态，避免永久否决 Queue（P1）
         resetSplitBtn();
         rememberRun("⚠ 收到空草稿结果，已复位提交状态；请重试", "err");
@@ -1663,9 +1728,11 @@ function init(node) {
   function resetSplitBtn() {
     if (M.splitBtn) { M.splitBtn.disabled = false; M.splitBtn.textContent = "⚡拆解"; M.splitBtn = null; }
     if (M.poseBtn) { M.poseBtn.disabled = false; M.poseBtn.textContent = "📥姿势"; M.poseBtn = null; }
+    if (M.costumeBtn) { M.costumeBtn.disabled = false; M.costumeBtn.textContent = "📥服装"; M.costumeBtn = null; }
     // 提交已结束（结果到达/失败/超时/队列空）：清掉本次提交的 source 归属记录
     M.splitSrcSig = "";
     M.poseSrcSig = "";
+    M.costumeSrcSig = "";
     M.submitting = false;
     // 最近一次手工提交也随本次提交结束而失效：之后到达的完整 Queue 结果没有
     // 匹配对象，回退到 mps_src_sig/pending 判断，不会被 prompt_id 误杀（P1）。
@@ -2021,22 +2088,32 @@ function init(node) {
     M.els.runStatus.className = "mps-status mps-runstatus " + (cls || "");
   };
   M.lastRunMsg = "";      // 最近一次语义事件（轮询空闲时保留显示）
-  M.posePendingAt = 0;    // 📥注入提交时间戳：区分 mps_draft 是拆解还是注入产物
+  M.posePendingAt = 0;    // 📥姿势提交时间戳：区分 mps_draft 是拆解还是注入产物
+  M.costumePendingAt = 0; // 📥服装提交时间戳
   M.splitPendingAt = 0;
   function rememberRun(t, cls) { M.lastRunMsg = t; setRun(t, cls); }
 
   function reportDraftArrived(draft) {
     const chars = (draft.items || []).filter((i) => i && i.label === "character");
-    const marked = chars.filter((c) => (c.caption || "").includes(POSE_MARKER));
-    const isInject = M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt;
-    const pair = marked.length && marked.some((c) => (c.caption.split(POSE_MARKER)[1] || "").length > 0) &&
-      chars.length >= 2 && (M.posePairHint || /双人/.test(node.widgets.find((x) => x.name === "pose_in")?.value || ""));
-    if (isInject) {
-      rememberRun(`✅ 姿势注入完成：${marked.length}/${chars.length} 角色已注入${pair ? "（双人姿势整体）" : ""} · 共 ${draft.items.length} 项 · 校验通过`, "ok");
+    const poseMarked = chars.filter((c) => (c.caption || "").includes(POSE_MARKER));
+    const costumeMarked = chars.filter((c) => (c.caption || "").includes(COSTUME_MARKER));
+    const isPoseInject = !!(M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt);
+    const isCostumeInject = !isPoseInject
+      && !!(M.costumePendingAt && Date.now() - M.costumePendingAt < 30000 && !M.splitPendingAt);
+    if (isPoseInject) {
+      const pair = poseMarked.length && chars.length >= 2
+        && (M.posePairHint || /双人/.test(node.widgets.find((x) => x.name === "pose_in")?.value || ""));
+      rememberRun(`✅ 姿势注入完成：${poseMarked.length}/${chars.length} 角色已注入${pair ? "（双人姿势整体）" : ""} · 共 ${draft.items.length} 项 · 校验通过`, "ok");
+    } else if (isCostumeInject) {
+      rememberRun(`✅ 服装注入完成：${costumeMarked.length}/${chars.length} 角色已注入 · 共 ${draft.items.length} 项 · 校验通过`, "ok");
     } else {
-      rememberRun(`✅ AI 拆解完成：${draft.items.length} 项（角色 ${chars.length}）${marked.length ? ` · 姿势已注入 ${marked.length} 人${chars.length >= 2 ? "（当前双人）" : "（当前单人）"}` : " · 未注入姿势"} · 画布已刷新`, "ok");
+      const bits = [];
+      if (poseMarked.length) bits.push(`姿势 ${poseMarked.length} 人`);
+      if (costumeMarked.length) bits.push(`服装 ${costumeMarked.length} 人`);
+      rememberRun(`✅ AI 拆解完成：${draft.items.length} 项（角色 ${chars.length}）${bits.length ? ` · 已注入 ${bits.join(" / ")}` : " · 未注入姿势/服装"} · 画布已刷新`, "ok");
     }
-    M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
+    M.posePendingAt = 0; M.costumePendingAt = 0;
+    M.splitPendingAt = 0; M.posePairHint = false;
   }
 
   // /queue 轮询：显示排队/执行中；空闲时保留最近语义消息
@@ -2099,10 +2176,12 @@ function init(node) {
     M.poseBtn = btn;
     M.splitAt = Date.now(); // 复用空队列监视器的防卡死计时
     M.posePendingAt = Date.now(); // 运行状态：区分 mps_draft 是注入产物
+    M.costumePendingAt = 0;
     M.splitPendingAt = 0;
     M.posePairHint = /双人/.test(String((node.widgets.find((x) => x.name === "pose_in") || {}).value || ""));
     // 记录本次注入提交对应的 source：结果回来时若 source 已变则丢弃旧结果（P0-1）
     M.poseSrcSig = currentSourceSig();
+    M.costumeSrcSig = "";
     M.splitSrcSig = "";
     M.els.status.textContent = "⏳ 姿势注入中…（本地写入不调 LLM；"
       + (sel >= 0 ? "注入到选中角色" : "按左右/面积规则自动分配") + "）";
@@ -2118,8 +2197,14 @@ function init(node) {
         ai_draft: !!(wAi && wAi.value),
         force_split: false,
         apply_pose: sel >= 0 ? sel : -2, // -2=自动分配（后端约定），>=0=选中角色下标
+        apply_costume: -1,                // 明确关闭另一条注入通道（防旧值残留）
       });
       if (!inputs) throw new Error("编辑器被旁路或未注册（检查 Ctrl+B / 节点状态）");
+      // 本地注入执行极快，executed 可能先于 /prompt 响应到达：先记上一提交 id
+      // 并清空 lastSubmitId，结果先到时按“本次提交”接受（见 submit_gate.js）。
+      const submitToken = ++M.submitSeq;
+      M.submitPrevId = M.lastSubmitId || M.lastDraftPid || "";
+      M.lastSubmitId = "";
       const r = await api.fetchApi("/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2130,7 +2215,10 @@ function init(node) {
         throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
       }
       const j = await r.json().catch(() => ({}));
-      M.lastSubmitId = (j && j.prompt_id) || "";
+      // 结果先到并已复位时不要再把旧 pid 写回，否则下一条结果会被误判 foreign。
+      if (M.submitSeq === submitToken && M.submitting) {
+        M.lastSubmitId = (j && j.prompt_id) || "";
+      }
       const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
       console.info("[MPS] submit", {
         kind: "pose",
@@ -2141,10 +2229,126 @@ function init(node) {
         pose_in: submitted.pose_in,
         pose_in_2: submitted.pose_in_2,
         pose_mode: submitted.pose_mode,
+        costume_in: submitted.costume_in,
       });
     } catch (e) {
       resetSplitBtn();
       fail("姿势注入提交失败: " + e.message);
+    }
+  }
+
+  // 📥服装按钮：与 📥姿势 同一条本地注入通道（不调 LLM），只是写入 ；服装： 段。
+  // 选中角色→只注入它；未选中→双参考按左右分配、单参考给最突出角色。
+  async function applyCostume(btn) {
+    const api = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+    if (!api || !api.clientId) { alert("前端尚未就绪，稍后再试"); return; }
+    const fail = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status err"; };
+    if (M.submitting) {
+      fail("已有拆解/注入任务在飞，请等待完成");
+      return;
+    }
+    if (!M.S || M.S.kind !== "layout") {
+      fail("画布还没有拆解完成的布局：先 ⚡拆解（或贴入 layout 草稿）再注入服装");
+      return;
+    }
+    const linked = (name) => {
+      const inp = (node.inputs || []).find((x) => x && x.name === name);
+      return !!inp && inp.link != null;
+    };
+    const wCost = node.widgets.find((x) => x.name === "costume_in");
+    const wCost2 = node.widgets.find((x) => x.name === "costume_in_2");
+    const srcA = resolvePoseSource({ linked: linked("costume_in"), widgetValue: wCost && wCost.value });
+    const srcB = resolvePoseSource({ linked: linked("costume_in_2"), widgetValue: wCost2 && wCost2.value });
+    if (srcA === "none" && srcB === "none") {
+      fail("没有可用的服装来源：连接 Costume Gallery 的 description 到 costume_in/costume_in_2，或在服装参考面板手填");
+      return;
+    }
+    const wMode = node.widgets.find((x) => x.name === "costume_mode");
+    if (wMode && wMode.value === "关闭") {
+      fail("costume_mode=关闭：请先切回 自动 再注入");
+      return;
+    }
+    // 敏感分类提示（不拦截）：只影响提示词内容，不会额外发送到外部服务。
+    const sensitive = ["costume_in", "costume_in_2"].some((name) => {
+      const ww = node.widgets.find((x) => x && x.name === name);
+      const lv = linkSourceValue(name);
+      return costumeIsSensitive(lv != null ? lv : (ww && ww.value));
+    });
+    // 画布 summary/角色描述里已有旧服装时，本地注入只追加服装段，可能新旧混合
+    // （反推草稿尤其常见：summary 或 object 里还留着旧连衣裙/背心）。
+    const oldCostumeWarn = (() => {
+      const dd = M.S && M.S.d;
+      if (!dd) return "";
+      const texts = [dd.summary && dd.summary.caption,
+        ...(dd.items || []).filter((x) => x && x.label === "character").map((x) => x.caption)];
+      return texts.some(textMentionsCostume)
+        ? "\n⚠ 画布 summary/角色描述里已有旧服装措辞：📥服装只追加「；服装：」段，模型可能混合新旧衣服；要彻底替换请用 ⚡拆解"
+        : "";
+    })();
+    const items = (M.S.d && M.S.d.items) || [];
+    let sel = -1;
+    if (M.sel != null && items[M.sel] && items[M.sel].label === "character") sel = M.sel;
+    M.submitting = true;
+    btn.disabled = true;
+    btn.textContent = "⏳注入中…";
+    M.costumeBtn = btn;
+    M.splitAt = Date.now();
+    M.costumePendingAt = Date.now();
+    M.posePendingAt = 0;
+    M.splitPendingAt = 0;
+    M.posePairHint = false;
+    M.costumeSrcSig = currentSourceSig();
+    M.poseSrcSig = "";
+    M.splitSrcSig = "";
+    M.els.status.textContent = "⏳ 服装注入中…（本地写入不调 LLM；"
+      + (sel >= 0 ? "注入到选中角色" : "按左右/面积规则自动分配") + "）"
+      + (sensitive ? "\n⚠ 该服装参考属于内衣/性感/泳装分类，请确认用途与内容合规" : "")
+      + oldCostumeWarn;
+    M.els.status.className = "mps-status";
+    try {
+      if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      writeEdits(); // 冲洗画布最新内容到 edits widget，提交的就是眼前这份
+      const full = await app.graphToPrompt();
+      const all = (full && (full.output || full)) || {};
+      const wAi = node.widgets.find((x) => x.name === "ai_draft");
+      const inputs = buildSplitPayload(all, node.id, {
+        edits: wEdits.value,
+        ai_draft: !!(wAi && wAi.value),
+        force_split: false,
+        apply_costume: sel >= 0 ? sel : -2,
+        apply_pose: -1,
+      });
+      if (!inputs) throw new Error("编辑器被旁路或未注册（检查 Ctrl+B / 节点状态）");
+      const submitToken = ++M.submitSeq;
+      M.submitPrevId = M.lastSubmitId || M.lastDraftPid || "";
+      M.lastSubmitId = "";
+      const r = await api.fetchApi("/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: inputs, client_id: api.clientId }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
+      }
+      const j = await r.json().catch(() => ({}));
+      if (M.submitSeq === submitToken && M.submitting) {
+        M.lastSubmitId = (j && j.prompt_id) || "";
+      }
+      const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
+      console.info("[MPS] submit", {
+        kind: "costume",
+        prompt_id: M.lastSubmitId,
+        srcSig: M.costumeSrcSig,
+        editsLen: (submitted.edits || "").length,
+        editsHash: textHash(submitted.edits || ""),
+        costume_in: submitted.costume_in,
+        costume_in_2: submitted.costume_in_2,
+        costume_mode: submitted.costume_mode,
+      });
+    } catch (e) {
+      resetSplitBtn();
+      fail("服装注入提交失败: " + e.message);
     }
   }
   // 连线源的值（尽力解析）：用于判断 ⚡拆解 时 widget 里点选/手填的值是否真的被连线覆盖。
@@ -2174,10 +2378,10 @@ function init(node) {
   }
 
   // 「有连线 + widget 非空且值不同」→ 返回一次提示文本（ComfyUI 提交以连线值为准）。
-  function poseLinkOverrideWarning() {
+  function referenceLinkOverrideWarning() {
     if (M.poseLinkWarned) return "";
     const hit = [];
-    for (const name of ["pose_in", "pose_in_2"]) {
+    for (const name of ["pose_in", "pose_in_2", "costume_in", "costume_in_2"]) {
       const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
       const inp = idx >= 0 ? node.inputs[idx] : null;
       if (!inp || inp.link == null) continue;
@@ -2190,7 +2394,7 @@ function init(node) {
     }
     if (!hit.length) return "";
     M.poseLinkWarned = true;
-    return `⚠ ${hit.join(" / ")} 已连线：本次 ⚡拆解 以连线值为准（widget 里的点选/手填值不会生效）`;
+    return `⚠ ${hit.join(" / ")} 已连线：本次 ⚡拆解 以连线值为准（面板里手填的值不会生效）`;
   }
 
   async function runAiSplit(btn) {
@@ -2225,13 +2429,23 @@ function init(node) {
     M.splitAt = Date.now();
     M.splitPendingAt = Date.now(); // 运行状态：本次 mps_draft 是拆解产物
     M.posePendingAt = 0;
+    M.costumePendingAt = 0;
     // 记录本次拆解提交对应的 source：LLM 执行期间用户改 source 时，旧结果晚到
     // 会被丢弃，避免旧画布被盖上当前 source 的签名（P0-1）
     M.splitSrcSig = currentSourceSig();
     M.poseSrcSig = "";
-    const linkWarn = poseLinkOverrideWarning();
+    M.costumeSrcSig = "";
+    const linkWarn = referenceLinkOverrideWarning();
+    const costumeTexts = ["costume_in", "costume_in_2"].map((name) => {
+      const ww = node.widgets.find((x) => x && x.name === name);
+      const lv = linkSourceValue(name);
+      return String(lv != null ? lv : (ww && ww.value) || "");
+    });
+    const sensitiveWarn = costumeTexts.some(costumeIsSensitive)
+      ? "\n⚠ 服装参考属于内衣/性感/泳装分类，将随拆解发送到 LLM，请确认用途与内容合规"
+      : "";
     M.els.status.textContent = "⏳ AI 拆解中…（LLM 生成布局草稿，通常 10~120 秒，完成后画布自动刷新）"
-      + (linkWarn ? "\n" + linkWarn : "");
+      + (linkWarn ? "\n" + linkWarn : "") + sensitiveWarn;
     M.els.status.className = "mps-status";
     try {
       // 以整个工作流当前状态取数，再裁剪出编辑器及其上游子图：
@@ -2240,8 +2454,13 @@ function init(node) {
       if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
       const full = await app.graphToPrompt();
       const all = (full && (full.output || full)) || {};
-      const inputs = buildSplitPayload(all, node.id);
+      // 显式关闭两条注入通道：隐藏 widget 若被旧工作流写成非 -1，会走注入分支
+      // 而不是 AI 拆解，导致“⚡拆解”实际不调 LLM。
+      const inputs = buildSplitPayload(all, node.id, { apply_pose: -1, apply_costume: -1 });
       if (!inputs) throw new Error("编辑器被旁路或未注册，无法单独拆解（检查 Ctrl+B / 节点状态）");
+      const submitToken = ++M.submitSeq;
+      M.submitPrevId = M.lastSubmitId || M.lastDraftPid || "";
+      M.lastSubmitId = "";
       const r = await api.fetchApi("/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2252,7 +2471,9 @@ function init(node) {
         throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
       }
       const j = await r.json().catch(() => ({}));
-      M.lastSubmitId = (j && j.prompt_id) || "";
+      if (M.submitSeq === submitToken && M.submitting) {
+        M.lastSubmitId = (j && j.prompt_id) || "";
+      }
       const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
       console.info("[MPS] submit", {
         kind: "split",
@@ -2263,6 +2484,9 @@ function init(node) {
         pose_in: submitted.pose_in,
         pose_in_2: submitted.pose_in_2,
         pose_mode: submitted.pose_mode,
+        costume_in: submitted.costume_in,
+        costume_in_2: submitted.costume_in_2,
+        costume_mode: submitted.costume_mode,
       });
     } catch (e) {
       resetSplitBtn();
@@ -2281,16 +2505,16 @@ function init(node) {
       M.els.status.textContent = "拆解失败: " + (d.exception_message || "未知错误");
       M.els.status.className = "mps-status err";
       rememberRun("❌ 本节点执行失败：" + (d.exception_message || "未知错误"), "err");
-      M.posePendingAt = 0; M.splitPendingAt = 0;
+      M.posePendingAt = 0; M.costumePendingAt = 0; M.splitPendingAt = 0;
     } catch (e) { /* noop */ }
   };
 
   // 队列跑完却没等到本节点的 executed（结果被缓存跳过 / 事件丢失）→ 解除按钮卡死
   const onApiStatus = (ev) => {
     try {
-      if (!M.splitBtn && !M.poseBtn) return;
+      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn) return;
       const st = ev && ev.detail;
-      const hasPending = !!(M.splitBtn || M.poseBtn);
+      const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn);
       const elapsedMs = Date.now() - (M.splitAt || 0);
       // 显式解析两种 status 负载；queue_remaining=0 必须命中（F2）
       if (shouldResetOnQueueIdle({ queueRemaining: queueRemaining(st), hasPending, elapsedMs })) {
@@ -2305,12 +2529,13 @@ function init(node) {
   // 执行被用户/系统中断：复位按钮与 M.submitting，避免永久否决 Queue（F2）
   const onApiInterrupted = () => {
     try {
-      if (!M.splitBtn && !M.poseBtn && !M.submitting) return;
+      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.submitting) return;
       resetSplitBtn();
       M.builtSig = M.pendSig = currentSig();
       M.els.status.textContent = "执行被中断：已复位拆解/注入按钮，可重新提交";
       M.els.status.className = "mps-status err";
       M.posePendingAt = 0;
+      M.costumePendingAt = 0;
       M.splitPendingAt = 0;
     } catch (e) { /* noop */ }
   };
@@ -2344,7 +2569,7 @@ function init(node) {
       // 本节点执行完却没带回新草稿（例如 edits 透传 / 输入没变被缓存）：
       // 解除"⏳拆解中/⏳注入中"，别让按钮挂着等一个不会来的结果。
       const ui = out || {};
-      if ((M.splitBtn || M.poseBtn) && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
+      if ((M.splitBtn || M.poseBtn || M.costumeBtn) && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
         // 不是本次手工提交的执行（完整 Queue 透传等）：保持等待，别提前复位
         if (pidMismatch) return;
         resetSplitBtn();
@@ -2393,7 +2618,7 @@ function init(node) {
       M.pendSig = sig;
     }
     // 拆解/注入按钮卡死硬兜底：180s 仍无结果就解除（applyPose 共用 M.splitAt）
-    const hasPending = !!(M.splitBtn || M.poseBtn);
+    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn);
     if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0) })) {
       resetSplitBtn();
       M.builtSig = M.pendSig = currentSig();
@@ -2413,10 +2638,25 @@ function initTranslator(node) {
   if (!(node.widgets || []).some(w => w.name === "provider")) return;
   if (typeof node.addDOMWidget !== "function") return;
   sanitizeAgentMd(node);
+  // ≤v1.7.2 工作流 widgets_values 错位会把 canvas_width 读成 ""（INT 收字符串），
+  // 服务端校验失败时采样输出分支被静默忽略——“运行成功但不出图”。这里静默修回。
+  const normalizeCanvasWidgets = (n) => {
+    for (const nm of ["canvas_width", "canvas_height"]) {
+      const w = (n.widgets || []).find((x) => x.name === nm);
+      if (!w) continue;
+      const v = normalizeIntWidget(w.value);
+      if (w.value !== v) {
+        w.value = v;
+        if (w.inputEl) w.inputEl.value = v;
+      }
+    }
+  };
+  normalizeCanvasWidgets(node);
   const prevCfg = node.onConfigure;
   node.onConfigure = function (...a) {
     const r = prevCfg ? prevCfg.apply(this, a) : undefined;
     sanitizeAgentMd(this);
+    normalizeCanvasWidgets(this);
     return r;
   };
 

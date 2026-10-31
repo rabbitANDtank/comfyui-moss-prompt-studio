@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   detectKind, reverseCompiled, parseSourceText, validateDraft,
   snapshotOf, serializeDraft, clampBox, resizeDraft, sourceSignature, clampArea,
-  fitCanvasDisplay,
+  fitCanvasDisplay, normalizeIntWidget,
 } from "../web/js/editor/model.js";
 
 const DRAFT = {
@@ -171,4 +171,20 @@ test("clampArea keeps preset resizes inside MOSS 0.25M–4M", () => {
   assert.deepEqual(clampArea(1024, 1024), [1024, 1024], "合法面积不变");
   const [w2, h2] = clampArea(4096, 2160);
   assert.ok(w2 * h2 <= 4000000 && w2 % 16 === 0 && h2 % 16 === 0);
+});
+
+// ≤v1.7.2 工作流 widgets_values 错位：INT 控件被读成 ""/"自动" 会让服务端
+// 校验失败、采样分支被静默忽略（运行成功但不出图）
+test("normalizeIntWidget 修复旧工作流错位的 INT 值", () => {
+  assert.equal(normalizeIntWidget(928), 928, "合法整数保留");
+  assert.equal(normalizeIntWidget("928"), 928, "数字字符串可救回");
+  assert.equal(normalizeIntWidget(""), 1024, "空串回默认");
+  assert.equal(normalizeIntWidget("自动"), 1024, "错位字符串回默认");
+  assert.equal(normalizeIntWidget(null), 1024);
+  assert.equal(normalizeIntWidget(undefined), 1024);
+  assert.equal(normalizeIntWidget(NaN), 1024);
+  assert.equal(normalizeIntWidget(3.5), 1024, "非整数回默认");
+  assert.equal(normalizeIntWidget(16), 1024, "低于 min 回默认");
+  assert.equal(normalizeIntWidget(99999), 1024, "高于 max 回默认");
+  assert.equal(normalizeIntWidget("", { def: 0, min: 0, max: 100 }), 0, "自定义默认");
 });

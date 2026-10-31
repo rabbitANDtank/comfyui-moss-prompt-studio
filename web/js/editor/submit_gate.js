@@ -73,13 +73,20 @@ export function isDuplicateDraft({
  * 都必须复位提交状态，否则 M.submitting 会一直否决 Queue/Ctrl+Enter。
  */
 export function resultAttributionDecision({
-  promptId, lastSubmitId, uiSig, currentSig, pendingSig, duplicate = false,
+  promptId, lastSubmitId, previousSubmitId, uiSig, currentSig, pendingSig, duplicate = false,
 } = {}) {
   const pid = normText(promptId);
   const last = normText(lastSubmitId);
+  const prev = normText(previousSubmitId);
   // 结果自带 prompt_id 且与最近一次提交不符：这是别的执行（完整 Queue/旧提交），
   // 即使 source 签名相同也不能写回（同 source 二次提交的场景）。
   if (pid && last && pid !== last) {
+    return { outcome: "foreign", write: false, resetPending: false, notify: true };
+  }
+  // 本地注入执行很快，executed 事件可能先于 /prompt 响应到达：此时 lastSubmitId
+  // 已在新提交开始时清空，必须接受本次结果。但上一提交的迟到结果（pid 与
+  // previousSubmitId 相同）仍要丢弃，避免它顶掉本次画布。
+  if (pid && !last && prev && pid === prev) {
     return { outcome: "foreign", write: false, resetPending: false, notify: true };
   }
   if (duplicate) {

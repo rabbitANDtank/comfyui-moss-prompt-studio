@@ -14,9 +14,11 @@ try:
     from ..py.sniff import sniff
     from ..py.translate import (
         AGENT_DEFAULT,
+        COSTUME_MODES,
         DEFAULT_AI_DRAFT_PROMPT,
         POSE_MODES,
         agent_md_widget_options,
+        apply_costume_to_draft,
         apply_pose_to_draft,
         load_agent_md,
         load_config,
@@ -31,9 +33,11 @@ except ImportError:  # 兼容非包方式导入
     from py.sniff import sniff
     from py.translate import (
         AGENT_DEFAULT,
+        COSTUME_MODES,
         DEFAULT_AI_DRAFT_PROMPT,
         POSE_MODES,
         agent_md_widget_options,
+        apply_costume_to_draft,
         apply_pose_to_draft,
         load_agent_md,
         load_config,
@@ -63,6 +67,7 @@ class MOSSEditor:
                    underlay=None, reverse_in=None, replace_edits=True,
                    last_applied_sig="", edits_source_sig="", force_split=False,
                    pose_in="", pose_in_2="", pose_mode="自动", apply_pose=-1,
+                   costume_in="", costume_in_2="", costume_mode="自动", apply_costume=-1,
                    provider="mimo", base_url="", model="", api_key="EMPTY",
                    temperature=0.3, thinking="off", timeout=180, ai_prompt="",
                    agent_md=AGENT_DEFAULT, **kwargs):
@@ -74,8 +79,10 @@ class MOSSEditor:
         # ⚡拆解按钮带 force_split=true：每次点击都要真正执行
         if ai_draft and force_split:
             return float("nan")
-        # 📥姿势按钮带 apply_pose != -1（-2 自动 / >=0 指定目标）：绕过缓存保证 ui 写回必达
+        # 📥姿势/📥服装按钮带 apply_* != -1（-2 自动 / >=0 指定目标）：绕过缓存保证 ui 写回必达
         if isinstance(apply_pose, int) and apply_pose != -1:
+            return float("nan")
+        if isinstance(apply_costume, int) and apply_costume != -1:
             return float("nan")
         # LLM 配置与 AGENT.md/config.json 实际内容也要进缓存键（与 Translator 同款）：
         # 否则改 provider/model/thinking/ai_prompt 后普通 Queue 会命中旧缓存，新配置不生效。
@@ -98,6 +105,8 @@ class MOSSEditor:
                 "ai_draft": bool(ai_draft),
                 "pose_in": pose_in or "", "pose_in_2": pose_in_2 or "",
                 "pose_mode": pose_mode or "自动",
+                "costume_in": costume_in or "", "costume_in_2": costume_in_2 or "",
+                "costume_mode": costume_mode or "自动",
                 "provider": provider, "base_url": base_url, "model": model,
                 "api_key": api_key, "temperature": temperature,
                 "thinking": thinking, "timeout": timeout, "ai_prompt": ai_prompt,
@@ -206,6 +215,26 @@ class MOSSEditor:
                     "placeholder": "姿势参考②：双人分别指定时给另一角色，点 🎯姿势② 选择",
                     "tooltip": "姿势参考②：双人分别指定姿势时给另一角色（与 pose_in 配对）；点 🎯姿势② 选择或手填/连线",
                 }),
+                # 服装注入（v1.8）：追加在全部姿势控件之后，保证旧工作流 widgets_values
+                # 的尾部定位不错位。仅消费 STRING（Costume Gallery.description 或手填）。
+                "costume_mode": (list(COSTUME_MODES), {
+                    "default": "自动",
+                    "tooltip": "服装注入闸门：自动=拆解 LLM 按人数套用；关闭=忽略服装输入（免拔线做 A/B 对照）。服装按角色分别套用，没有姿势的“强制双人”概念",
+                }),
+                "apply_costume": ("INT", {
+                    "default": -1, "min": -2, "max": 63, "hidden": True, "socketless": True,
+                    "tooltip": "内部：📥服装 按钮提交时的注入指令。-1=不注入（普通 Queue 默认）；-2=自动分配（双参考按左右、单参考给最突出角色）；>=0=只注入该下标的角色（画布选中目标）",
+                }),
+                "costume_in": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "服装参考①：连接 Costume Gallery 的 description，或粘贴任意服装描述",
+                    "tooltip": "服装参考①：把 comfyui-costume-gallery 的 description（分类 / 关键词…）连到这里，或手填/连线任意服装描述（连线值优先）。仅 ⚡拆解（LLM 展开）/📥服装（本地短语）时生效；会替换角色 caption 里的服装措辞，保留外貌/姿势/表情。双人且填了 costume_in_2 时本输入给 bbox 更靠左的角色。注意：不要接该节点的 image 输出，也不要接 Editor.underlay",
+                }),
+                "costume_in_2": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "服装参考②：双人分别指定时给另一角色",
+                    "tooltip": "服装参考②：双人分别指定服装时给另一角色（与 costume_in 配对）；手填或连接第二个 Costume Gallery 的 description",
+                }),
             },
         }
 
@@ -215,25 +244,38 @@ class MOSSEditor:
             agent_md=AGENT_DEFAULT, underlay=None, reverse_in=None,
             replace_edits=True, last_applied_sig="", edits_source_sig="",
             force_split=False, pose_in=None, pose_in_2=None, pose_mode="自动",
-            apply_pose=-1):
+            apply_pose=-1, costume_in=None, costume_in_2=None, costume_mode="自动",
+            apply_costume=-1):
         # reverse_in / replace_edits / last_applied_sig 只供前端反推写回使用，后端不参与解析
         # source/edits 优先级：edits 只对写入时的那份 source 生效；换源后以 source 为准。
         text = resolve_editor_text(source, edits, edits_source_sig)
         info = sniff(text, canvas_width, canvas_height)
         ui = {}
 
-        # 📥姿势 本地注入：不调 LLM，把图库描述短语写进已拆解画布的角色 caption，
-        # 注入后过官方 validate_draft 再经 ui.mps_draft 写回（与拆解同一条写回通道）。
-        # apply_pose：-1=不注入（默认）；-2=自动分配；>=0=只注入该下标角色。
-        if isinstance(apply_pose, int) and apply_pose != -1:
+        # 📥姿势/📥服装 本地注入：不调 LLM，把图库描述短语写进已拆解画布的角色
+        # caption，注入后过官方 validate_draft 再经 ui.mps_draft 写回（与拆解同一条
+        # 写回通道）。apply_*= -1 不注入；-2 自动分配；>=0 只注入该下标角色。
+        # 两者可同时生效（先姿势后服装），由前端按钮分别提交。
+        pose_apply = isinstance(apply_pose, int) and apply_pose != -1
+        costume_apply = isinstance(apply_costume, int) and apply_costume != -1
+        if pose_apply or costume_apply:
             if info["kind"] != "layout":
+                what = "姿势/服装" if pose_apply and costume_apply else ("姿势" if pose_apply else "服装")
                 raise ValueError(
-                    "注入姿势需要拆解完成的画布（layout 形态）；当前输入是散文/caption，请先点 ⚡拆解")
-            info = {"kind": "layout", "draft": apply_pose_to_draft(
-                info["draft"], pose_in or "", pose_in_2 or "",
-                mode=pose_mode or "自动",
-                target_index=(apply_pose if apply_pose >= 0 else -1))}
-            ui["mps_draft"] = json.dumps(info["draft"], ensure_ascii=False, indent=2)
+                    f"注入{what}需要拆解完成的画布（layout 形态）；当前输入是散文/caption，请先点 ⚡拆解")
+            draft = info["draft"]
+            if pose_apply:
+                draft = apply_pose_to_draft(
+                    draft, pose_in or "", pose_in_2 or "",
+                    mode=pose_mode or "自动",
+                    target_index=(apply_pose if apply_pose >= 0 else -1))
+            if costume_apply:
+                draft = apply_costume_to_draft(
+                    draft, costume_in or "", costume_in_2 or "",
+                    mode=costume_mode or "自动",
+                    target_index=(apply_costume if apply_costume >= 0 else -1))
+            info = {"kind": "layout", "draft": draft}
+            ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
             # 结果自带 source 归属：前端用它与 currentSourceSig() 比较，判断迟到
             # 结果是否属于当前 source（P1-3/P1-4），不再只依赖内存里的 pending 槽位。
             # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
@@ -252,6 +294,8 @@ class MOSSEditor:
                 timeout=int(timeout), system_prompt=ai_prompt, agent_md=agent_md,
                 pose_a=pose_in or "", pose_b=pose_in_2 or "",
                 pose_mode=pose_mode or "自动",
+                costume_a=costume_in or "", costume_b=costume_in_2 or "",
+                costume_mode=costume_mode or "自动",
             )
             info = {"kind": "layout", "draft": draft}
             ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)

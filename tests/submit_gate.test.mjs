@@ -87,6 +87,30 @@ test("resultAttributionDecision matches prompt_id of the latest submission", () 
   }).write, false);
 });
 
+// v1.8：本地注入执行快，executed 可能先于 /prompt 响应到达（lastSubmitId 已清空）。
+test("resultAttributionDecision accepts same-submit result before /prompt response", () => {
+  // 新提交的结果先到：last 为空、prev 是上一提交 → 接受
+  const accepted = resultAttributionDecision({
+    promptId: "pid-new", lastSubmitId: "", previousSubmitId: "pid-old",
+    uiSig: "fnv1a:same", currentSig: "fnv1a:same",
+  });
+  assert.equal(accepted.outcome, "accept");
+  assert.equal(accepted.write, true);
+  // 上一提交的迟到结果：pid 等于 prev → 丢弃且不解除本次等待
+  const late = resultAttributionDecision({
+    promptId: "pid-old", lastSubmitId: "", previousSubmitId: "pid-old",
+    uiSig: "fnv1a:same", currentSig: "fnv1a:same",
+  });
+  assert.equal(late.outcome, "foreign");
+  assert.equal(late.write, false);
+  assert.equal(late.resetPending, false);
+  // 首次提交（prev 为空）的结果先到：接受
+  assert.equal(resultAttributionDecision({
+    promptId: "pid-first", lastSubmitId: "", previousSubmitId: "",
+    uiSig: "fnv1a:same", currentSig: "fnv1a:same",
+  }).outcome, "accept");
+});
+
 // P1：无 prompt_id（旧前端 onExecuted）或最近提交已复位时回退到签名判断。
 test("resultAttributionDecision falls back to source/pending signatures without prompt_id", () => {
   // 无 prompt_id，ui.mps_src_sig 与当前 source 一致 → 接受（保持旧行为）

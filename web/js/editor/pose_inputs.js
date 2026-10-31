@@ -1,17 +1,18 @@
 /**
- * Editor 的姿势参考输入双列面板（pose_in / pose_in_2）。
+ * Editor 的参考输入双列面板（pose_in / pose_in_2、costume_in / costume_in_2）。
  *
  * 与 llm_options.js 同样的思路：标准 widget 保留并参与序列化，只隐藏显示；
  * 这里用两个并排的 textarea 代替，右下角保留原生 resize 手柄。
  */
 
 export const POSE_INPUT_FIELDS = Object.freeze(["pose_in", "pose_in_2"]);
+export const COSTUME_INPUT_FIELDS = Object.freeze(["costume_in", "costume_in_2"]);
 
 /**
- * 姿势输入单元格的显示/可编辑状态（纯逻辑）：连线优先 —— 有连线时控件禁用，
- * 并在标题里说明「断开连线后可编辑」。mountPoseInputs 的 refresh 直接使用。
+ * 参考输入单元格的显示/可编辑状态（纯逻辑）：连线优先 —— 有连线时控件禁用，
+ * 并在标题里说明「断开连线后可编辑」。mountReferenceInputs 的 refresh 直接使用。
  */
-export function poseInputDisplay({ connected = false, value = "", title = "" } = {}) {
+export function referenceInputDisplay({ connected = false, value = "", title = "" } = {}) {
   const linked = !!connected;
   const suffix = "（当前由连线提供；断开连线后可在此编辑）";
   return {
@@ -22,6 +23,11 @@ export function poseInputDisplay({ connected = false, value = "", title = "" } =
   };
 }
 
+/** 兼容旧命名（姿势面板测试与调用方）。 */
+export function poseInputDisplay(opts) {
+  return referenceInputDisplay(opts);
+}
+
 export const POSE_INPUT_SPEC = Object.freeze({
   pose_in: {
     placeholder: "姿势参考①：点工具栏 🎯姿势① 选择，或粘贴/连线任意动作描述",
@@ -30,6 +36,17 @@ export const POSE_INPUT_SPEC = Object.freeze({
   pose_in_2: {
     placeholder: "姿势参考②：双人分别指定时给另一角色，点 🎯姿势② 选择",
     title: "姿势参考②：双人分别指定姿势时给另一角色；点 🎯姿势② 选择或手填/连线",
+  },
+});
+
+export const COSTUME_INPUT_SPEC = Object.freeze({
+  costume_in: {
+    placeholder: "服装参考①：连接 Costume Gallery 的 description，或粘贴任意服装描述",
+    title: "服装参考①：把 comfyui-costume-gallery 的 description（分类 / 关键词…）连到这里，或手填/连线服装描述；连线值优先。仅 ⚡拆解/📥服装时生效",
+  },
+  costume_in_2: {
+    placeholder: "服装参考②：双人分别指定时给另一角色",
+    title: "服装参考②：双人分别指定服装时给另一角色（与 costume_in 配对）；手填或连接第二个 Costume Gallery 的 description",
   },
 });
 
@@ -54,22 +71,42 @@ function ensureStyle() {
   document.head.appendChild(style);
 }
 
+const POSE_CONFIG = {
+  fields: POSE_INPUT_FIELDS,
+  specs: POSE_INPUT_SPEC,
+  title: "姿势参考",
+  domName: "mps_poseinputs",
+  storeKey: "_mpsPoseInputs",
+  idPrefix: "mps-pose",
+  panelClass: "mps-poseinputs",
+};
+
+const COSTUME_CONFIG = {
+  fields: COSTUME_INPUT_FIELDS,
+  specs: COSTUME_INPUT_SPEC,
+  title: "服装参考",
+  domName: "mps_costumeinputs",
+  storeKey: "_mpsCostumeInputs",
+  idPrefix: "mps-costume",
+  panelClass: "mps-poseinputs mps-costumeinputs",
+};
+
 /**
- * 在 Editor 节点上挂载双列姿势参考面板。
+ * 在 Editor 节点上挂载双列参考面板。
  * 返回 { refresh, dispose, panel }；重复调用返回同一个实例。
  */
-export function mountPoseInputs(node) {
-  if (!node || node._mpsPoseInputs) return node ? node._mpsPoseInputs || null : null;
+export function mountReferenceInputs(node, cfg) {
+  if (!node || node[cfg.storeKey]) return node ? node[cfg.storeKey] || null : null;
   if (typeof document === "undefined" || typeof node.addDOMWidget !== "function") return null;
 
   // 动态取：前端 configure 时可能替换 widget 对象。
   const get = (name) => (node.widgets || []).find((w) => w.name === name);
-  if (!get("pose_in") || !get("pose_in_2")) return null;
+  if (cfg.fields.some((name) => !get(name))) return null;
 
   ensureStyle();
 
   const panel = document.createElement("div");
-  panel.className = "mps-poseinputs notranslate";
+  panel.className = cfg.panelClass + " notranslate";
   panel.setAttribute("translate", "no");
   const grid = document.createElement("div");
   grid.className = "mps-poseinputs-grid";
@@ -101,8 +138,8 @@ export function mountPoseInputs(node) {
     for (const [name, el] of controls) {
       const w = get(name);
       if (!w) continue;
-      const spec = POSE_INPUT_SPEC[name] || {};
-      const state = poseInputDisplay({
+      const spec = cfg.specs[name] || {};
+      const state = referenceInputDisplay({
         connected: isConnected(name), value: w.value, title: spec.title || "",
       });
       el.disabled = state.disabled;
@@ -114,11 +151,11 @@ export function mountPoseInputs(node) {
   };
 
   const fields = [];
-  for (const name of POSE_INPUT_FIELDS) {
+  for (const name of cfg.fields) {
     const w = get(name);
     if (!w) continue;
     fields.push(name);
-    const spec = POSE_INPUT_SPEC[name] || {};
+    const spec = cfg.specs[name] || {};
     const cell = document.createElement("div");
     cell.className = "mps-poseinputs-cell";
     cell.dataset.name = name;
@@ -134,8 +171,8 @@ export function mountPoseInputs(node) {
     el.placeholder = spec.placeholder || "";
     el.value = String(w.value ?? "");
     el.title = spec.title || "";
-    el.dataset.mpsPoseName = name;
-    label.htmlFor = (el.id = `mps-pose-${node.id}-${name}`);
+    el.dataset.mpsInputName = name;
+    label.htmlFor = (el.id = `${cfg.idPrefix}-${node.id}-${name}`);
     el.addEventListener("input", () => apply(name, el.value));
     controls.set(name, el);
     cell.append(label, el);
@@ -160,16 +197,16 @@ export function mountPoseInputs(node) {
   };
   hideWidgets();
 
-  const dw = node.addDOMWidget("姿势参考", "mps_poseinputs", panel, {
+  const dw = node.addDOMWidget(cfg.title, cfg.domName, panel, {
     serialize: false,
     hideOnZoom: false,
   });
   dw.serialize = false;
   if (dw.options) dw.options.serialize = false;
 
-  // 插到 pose_in 的位置：pose_mode 在其前，画布 DOM widget 在其后。
-  const firstPose = get("pose_in");
-  const insertAt = firstPose ? node.widgets.indexOf(firstPose) : -1;
+  // 插到第一个参考 widget 的位置：上一组面板/开关在其前，画布 DOM widget 在其后。
+  const firstField = get(cfg.fields[0]);
+  const insertAt = firstField ? node.widgets.indexOf(firstField) : -1;
   if (insertAt >= 0) {
     const own = node.widgets.indexOf(dw);
     if (own >= 0) node.widgets.splice(own, 1);
@@ -239,6 +276,14 @@ export function mountPoseInputs(node) {
       try { node.setDirtyCanvas?.(true, true); } catch (e) { /* noop */ }
     },
   };
-  node._mpsPoseInputs = instance;
+  node[cfg.storeKey] = instance;
   return instance;
+}
+
+export function mountPoseInputs(node) {
+  return mountReferenceInputs(node, POSE_CONFIG);
+}
+
+export function mountCostumeInputs(node) {
+  return mountReferenceInputs(node, COSTUME_CONFIG);
 }

@@ -176,6 +176,18 @@ export function serializeDraft(S) {
 export const clampDim = (v) => Math.max(64, Math.min(15360, Math.round(v / 16) * 16));
 export const snap16 = (v) => clampDim(v);
 
+/**
+ * INT widget 值归一：旧工作流（≤v1.7.2）widgets_values 错位会把 INT 控件读成
+ * ""/"自动"/null 等字符串，服务端校验失败会让整条输出分支被静默忽略（表现为
+ * “运行成功但不出图”）。数字字符串可救回；其余/越界一律回默认值。
+ */
+export function normalizeIntWidget(value, { def = 1024, min = 64, max = 15360 } = {}) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return def;
+  if (n < min || n > max) return def;
+  return n;
+}
+
 /** 与 py/translate.py source_signature() 完全一致的 FNV-1a（UTF-8 bytes）。 */
 export function sourceSignature(text) {
   const bytes = new TextEncoder().encode(String(text ?? ""));
