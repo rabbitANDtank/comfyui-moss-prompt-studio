@@ -2,7 +2,7 @@
 
 当前版本：**v1.8.0**
 
-> **本次更新**：新增服装注入与姿势服装对调，修连续注入误判、旧衣残留，拆解键高亮（详见「版本与更新」）。旧工作流中的 Editor 节点请**删除后重新添加，并按新节点重新连线**。
+> **本次更新（v1.9.0-beta0）**：纯架构重构——后端/前端/测试三大文件按职责拆分为小模块，**行为零变化**，旧工作流无需任何调整（详见「版本与更新」）。v1.8.x 的姿势/服装参考暂无节点输入口（见上文已知限制），1.9.0 正式版恢复。
 
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接原生 MOSS-Image 节点生图。
 
@@ -176,6 +176,7 @@ node --test tests/*.test.mjs  # 128 用例（glob 自动包含所有前端测试
 
 ## 版本与更新
 
+- **v1.9.0-beta0**：纯架构重构版，**用户可见行为零变化**（节点名/输入输出/工作流兼容性不变）。`py/translate.py`（1402 行）拆为 llm_client/agent_md/caption_segments/inject_pose/inject_costume/draft_repair 六个职责模块，原文件保留为门面 re-export；`web/js/editor_canvas.js`（2705 行）拆为 11 个 `editor/` 模块（styles/dom_shell/canvas_render/items/inspector/edits_sync/template_panel/pose_panel/inject_flows/run_status/translator_panel），主文件仅剩组装骨架（441 行）；`tests/run_tests.py`（3237 行）拆为 `tests/py/` 11 个用例文件 + 自动收集 runner（新增测试不再需要注册列表）。拆分经逐字节一致校验与行为冒烟轨迹对比验证；Python **102** / Node **128** 与拆分前完全一致。测试 runner 勿并发运行（见文件头注释）。
 - **v1.8.0**：新增可选服装注入（comfyui-costume-gallery `description → costume_in(_2)`、`costume_mode`、📥服装、🔄 对调两人服装）；caption 改为通用分段解析，姿势/服装/遮挡后缀可共存且互不删除；修复连续快速注入的结果误判（submit token）与反推草稿旧服装 object 残留；新增敏感分类/旧服装混合提示；⚡拆解 改为主色大按钮；Editor/Translator 画布宽高控件类型归一（旧工作流错位导致的「运行成功但不出图」）。Python **102** / Node **128**。
 - **v1.7.2**：Editor 布局更新（LLM/AI 选项双列、姿势框双列可调高、`ai_prompt` 可拉伸、图层全文折行）；Translator 译文缓存与非 1024 已编译输入（`canvas_width`/`canvas_height`）；P0 官方契约修正（caption 纯文本、空 `meta/tags/palette`、非 text `text`、bbox 精度）；修复 Python/JS 验证器分叉、队列结果归属/重复卡死/事务写回、SSRF 100.64/10、探测错误体限长、`agent_md` 删除锁死、检查器焦点、画布高度与指针清理。Python **90** / Node **112**。
 - **v1.7.1**：新增可选姿势注入节点并加固连接测试、缓存与资源生命周期。
