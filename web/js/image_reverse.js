@@ -360,10 +360,11 @@ function initNode(node) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: subset, client_id: a.clientId }),
       });
+      const j = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        const j = await resp.json().catch(() => ({}));
         throw new Error((j.error && j.error.message) || ("HTTP " + resp.status));
       }
+      if (j && j.prompt_id) healReverseFromHistory(a, node, j.prompt_id);
       setReverseStatus(node, "已提交单独反推：完成后结果写回 Editor；完整链路请再 Queue 一次", "");
     } catch (e) {
       setReverseStatus(node, "反推提交失败: " + ((e && e.message) || e), "err");
@@ -474,6 +475,32 @@ function applyReverse(node, raw) {
   node._mpsLastUiSig = payload.sig;
   node._mpsLastUiAt = Date.now();
 }
+
+/** 反推自愈（v1.9.0-beta0）：executed 事件可能丢失（复杂状态/后台冻结），提交成功后
+ * 轮询 /history/{pid}，事件通道没送到（_mpsLastUiSig 仍非本次 sig）时主动写回。
+ * 60s 内未完成则放弃（超长反推由用户重试）；与事件通道并行，幂等去重靠 sig。 */
+async function healReverseFromHistory(api, node, pid) {
+  const idStr = String(node.id);
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const res = await api.fetchApi("/history/" + encodeURIComponent(pid));
+      if (!res || !res.ok) continue;
+      const hist = await res.json();
+      const entry = hist && hist[pid];
+      const ui = entry && entry.outputs && entry.outputs[idStr];
+      if (!ui || ui.mps_reverse === undefined) continue;
+      const payload = parseReversePayload(ui.mps_reverse);
+      if (!payload) return;
+      if (node._mpsLastUiSig === payload.sig) return;  // 事件通道已处理
+      applyReverse(node, ui.mps_reverse);
+      return;
+    } catch (e) { /* noop */ }
+  }
+}
+
+// 排障入口：控制台可手动触发一次自愈（window.__mpsHealReverse(api, node, pid)）。
+if (typeof window !== "undefined") window.__mpsHealReverse = healReverseFromHistory;
 
 function onApiExecuted(ev) {
   const d = ev && ev.detail;
