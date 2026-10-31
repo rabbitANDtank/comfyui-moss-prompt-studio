@@ -46,9 +46,13 @@ export function normalizeApplyCostume(value) {
   return normalizeApplyPose(value);
 }
 
-/** pose_in / costume_in 等参考输入是字符串 widget；旧工作流可能读成 null/数字。 */
+/** pose_in / costume_in 等参考输入是字符串 widget；旧工作流可能读成 null/数字。
+ * 工作流 widgets_values 序列化/恢复错位可能把 pose_mode 的合法值「自动」灌进
+ * 文本参考（v1.9.0-beta0 真机实测 pose_in_2 每次重载必现）：文本参考没有
+ * 「自动」语义，归一为空串，避免未填的第二姿势被当作已填送给拆解 LLM。 */
 export function normalizePoseText(value) {
-  return typeof value === "string" ? value : "";
+  const s = typeof value === "string" ? value : "";
+  return s.trim() === "自动" ? "" : s;
 }
 
 export function normalizeCostumeText(value) {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   POSE_MARKER, POSE_MODES, poseMarkedItems, swapPoseSegments, buildSplitPayload,
-  normalizePoseMode, normalizeApplyPose, normalizePoseText, resolvePoseSource,
+  normalizePoseMode, normalizeApplyPose, normalizePoseText, normalizeCostumeText, resolvePoseSource,
   poseSourceLabel, poseWriteTarget, poseSourceWritable, splitPoseCaption,
 } from "../web/js/editor/pose.js";
 import { OCCL_FRONT, OCCL_BACK } from "../web/js/editor/model.js";
@@ -161,6 +161,15 @@ test("normalizePoseText keeps strings and falls back to empty string", () => {
   assert.equal(normalizePoseText(undefined), "");
   assert.equal(normalizePoseText(123), "");
   assert.equal(normalizePoseText({}), "");
+});
+
+test("normalizePoseText clears polluted 自动 from widgets_values misalignment", () => {
+  // v1.9.0-beta0 真机：工作流重载后 pose_in_2 被 costume_mode 默认值「自动」污染，
+  // 不清理会把未填的第二姿势当已填送给拆解 LLM。
+  assert.equal(normalizePoseText("自动"), "");
+  assert.equal(normalizePoseText(" 自动 "), "");
+  assert.equal(normalizePoseText("自动跟随"), "自动跟随");
+  assert.equal(normalizeCostumeText("自动"), "");
 });
 
 // ---------- 姿势三入口有效来源（F2） ----------

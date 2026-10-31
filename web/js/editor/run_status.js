@@ -310,8 +310,10 @@ export function mountRunStatus(ctx) {
     } else {
       M.pendSig = sig;
     }
-    // 拆解/注入按钮卡死硬兜底：180s 仍无结果就解除（applyPose 共用 M.splitAt）
-    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn);
+    // 拆解/注入按钮卡死硬兜底：180s 仍无结果就解除（applyPose 共用 M.splitAt）。
+    // v1.9.0-beta0 实测偶发：executed 事件丢失时 submitting 卡 true 而按钮引用已不匹配，
+    // 只看按钮引用会永久漏掉——任何 submitting 挂起都必须能被兜底复位（失效时立即解锁）。
+    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
     if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0) })) {
       fx.resetSplitBtn();
       M.builtSig = M.pendSig = fx.currentSig();
