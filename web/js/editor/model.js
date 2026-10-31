@@ -174,7 +174,6 @@ export function serializeDraft(S) {
 }
 
 export const clampDim = (v) => Math.max(64, Math.min(15360, Math.round(v / 16) * 16));
-export const snap16 = (v) => clampDim(v);
 
 /**
  * INT widget 值归一：旧工作流（≤v1.7.2）widgets_values 错位会把 INT 控件读成

@@ -208,7 +208,7 @@ class MOSSEditor:
                 "pose_in": ("STRING", {
                     "default": "", "multiline": True,
                     "placeholder": "姿势参考①：点工具栏 🎯姿势① 选择，或粘贴/连线任意动作描述",
-                    "tooltip": "姿势参考①：点工具栏 🎯姿势① 从图库选（需另装 comfyui-pose-gallery），也可手填动作描述或连线 STRING（如 Pose Gallery.description，连线值优先）。仅 ⚡拆解/📥注入时生效：替代角色 caption 中的动作措辞，服装/外貌/表情保留。双人且填了 pose_in_2 时本输入给 bbox 更靠左的角色；双人姿势则两人整体套用。拆解写回后换姿势需再点 ⚡拆解 或 📥姿势",
+                    "tooltip": "姿势参考①：点工具栏 🎯姿势① 从图库选（需另装 comfyui-pose-gallery），也可手填动作描述或连线 STRING（如 Pose Gallery.description，连线值优先）。仅 ⚡拆解/📥注入时生效：替代角色 caption 中的动作措辞，服装/外貌/表情保留；注意 📥姿势 不清理 caption 正文里的旧动作词（反推画布常见），要彻底替换请用 ⚡拆解。双人且填了 pose_in_2 时本输入给 bbox 更靠左的角色；双人姿势则两人整体套用。拆解写回后换姿势需再点 ⚡拆解 或 📥姿势",
                 }),
                 "pose_in_2": ("STRING", {
                     "default": "", "multiline": True,
@@ -333,7 +333,7 @@ def _save_underlay(images):
         img = Image.fromarray(arr)
         # 长边压到 1800，控制 data 体积
         img.thumbnail((1800, 1800))
-        name = f"moss_underlay_{int(time.time() * 1000)}.png"
+        name = f"moss_underlay_{unique_id}.png"  # 每节点固定名覆盖写，temp 不随连跑增长
         img.save(os.path.join(folder_paths.get_temp_directory(), name))
         return {"filename": name, "subfolder": "", "type": "temp"}
     except Exception:

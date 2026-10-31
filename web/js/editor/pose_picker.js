@@ -2,7 +2,6 @@
  * 数据来自后端 /moss_studio/pose_catalog 代理（已装 comfyui-pose-gallery 时可用），
  * item 字段：{id, system, category, name, view, search}。 */
 
-export const POSE_VIEWS = ["正面", "俯视", "仰视", "侧面", "斜侧"];
 
 /** 全部 / 体系 / 分类 / 视角 的去重列表（保持数据出现顺序，"全部"由 UI 层加）。 */
 export function buildFacets(items) {

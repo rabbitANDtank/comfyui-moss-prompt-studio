@@ -1,6 +1,6 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-当前版本：**v1.8.0**
+当前版本：**v1.9.0-beta0**
 
 > **本次更新（v1.9.0-beta0）**：纯架构重构——后端/前端/测试三大文件按职责拆分为小模块，**行为零变化**，旧工作流无需任何调整（详见「版本与更新」）。v1.8.x 的姿势/服装参考暂无节点输入口（见上文已知限制），1.9.0 正式版恢复。
 
@@ -136,7 +136,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 **不接时 Editor / Translator / Compiler 与旧版行为完全一致**。需要姿势控制时：
 
 1. 用 ComfyUI Manager 或按其 README 安装 [comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery) 到 `custom_nodes/`，重启 ComfyUI（本地中文姿势图库）；本插件只消费其 `description` 文本输出，不分发其图片/索引。
-2. 接法：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。`pose_in`/`pose_in_2` 也支持手填和 🎯 点选（连线优先）。`pose_mode` 默认 `自动`。**v1.8.x 节点左侧暂无 pose 输入口**（见顶部已知限制），请先在「姿势参考」面板手填或 🎯 点选。
+2. 接法：`Pose Gallery.description → Editor.pose_in`；双人时再接 `pose_in_2`。`pose_in`/`pose_in_2` 也支持手填和 🎯 点选（连线优先）。`pose_mode` 默认 `自动`。注意：**📥姿势 只替换 caption 末尾的姿势分段，不清理正文里的旧动作词**（反推画布常见"她双手叉腰站在…"式内联描写）——出现矛盾措辞时请用 ⚡拆解 彻底替换。**v1.8.x 节点左侧暂无 pose 输入口**（见顶部已知限制），请先在「姿势参考」面板手填或 🎯 点选。
 3. 两种注入：**⚡拆解**（LLM 展开姿势，一次 LLM 调用）与 **📥姿势**（本地短语版，拆解后免费秒注入）；`pose_mode` 控制自动/强制双人/关闭；检查器可「🔄 对调两人姿势」。
 4. 文字姿势约束弱于深度图，效果受模型影响；复杂姿势建议 ⚡拆解 + `thinking=low`，骨骼级控制请走 pose-gallery 的深度链路。具体控件与注入规则以节点 tooltip 为准。
 
@@ -168,8 +168,8 @@ custom_nodes/comfyui-moss-prompt-studio/
 ## 测试
 
 ```bash
-python tests/run_tests.py     # 102 用例
-node --test tests/*.test.mjs  # 128 用例（glob 自动包含所有前端测试）
+python tests/run_tests.py     # 106 用例
+node --test tests/*.test.mjs  # 130 用例（glob 自动包含所有前端测试）
 ```
 
 覆盖编译/识别/翻译/反推/连接测试/姿势注入/服装注入，以及前端纯逻辑、生命周期、写回和模式预设。控制台会打印 `[MOSS Studio] LLM ...` 日志，可用于排查耗时、重试和截断。真实 LLM 的姿势注入对照实验：`python tests/bench_ai_draft.py --variants pose_solo,pose_dual,pose_pair`（需 config.json）。
