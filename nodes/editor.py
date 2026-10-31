@@ -148,7 +148,7 @@ class MOSSEditor:
                 }),
                 "ai_draft": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "AI 拆解：输入是散文/caption 时调用 LLM 拆成带 bbox 的 layout 草稿（已是 layout 则忽略）。结果 Queue 后自动写回 edits 并显示画布；普通 Queue 按输入哈希缓存，重复 Queue 不重复计费；工具栏 ⚡拆解 每次都会强制重拆",
+                    "tooltip": "AI 拆解：输入是散文/caption 时调用 LLM 拆成带 bbox 的 layout 草稿（已是 layout 则忽略）。结果 Queue 后自动写回 edits 并显示画布；普通 Queue 按输入哈希缓存，重复 Queue 不重复计费；工具栏 ⚡拆解 每次都会强制重拆。注意：姿势/服装参考（pose_in/costume_in 等）只在拆解阶段生效（作为 LLM 指令）——关闭本开关时普通 Queue 不拆解、散文直接按 caption 处理，参考完全不生效；画布已是 layout 后换参考需 ⚡拆解 或 📥姿势/📥服装 本地注入",
                 }),
                 "provider": (["mimo", "deepseek", "minimax", "custom"], {"default": "mimo"}),
                 "base_url": ("STRING", {"default": "", "tooltip": "OpenAI 兼容地址；留空读 config.json；custom 可填任意兼容地址（含 Ollama / LM Studio）"}),
