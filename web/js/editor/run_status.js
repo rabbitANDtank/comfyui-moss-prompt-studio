@@ -205,19 +205,48 @@ export function mountRunStatus(ctx) {
     } catch (e) { /* noop */ }
   };
 
+  // 根因级自愈（v1.9.0-beta0）：executed 事件可能丢失（同 tab 多次重载/后台冻结等
+  // 复杂状态），此时结果已在 /history 里但前端永远收不到。队列空时主动补拉本次
+  // 提交的输出并走 processExecData（accept 会写回并复位），不再依赖事件总线。
+  const healFromHistory = async () => {
+    const pid = String(M.lastSubmitId || "").trim();
+    if (!pid) return false;
+    try {
+      const api = M.apiRef || (typeof app !== "undefined" ? app.api : null);
+      if (!api || typeof api.fetchApi !== "function") return false;
+      const res = await api.fetchApi("/history/" + encodeURIComponent(pid));
+      if (!res || !res.ok) return false;
+      const hist = await res.json();
+      const entry = hist && hist[pid];
+      const ui = entry && entry.outputs && entry.outputs[String(node.id)];
+      if (ui && ui.mps_draft !== undefined) {
+        processExecData(ui, { promptId: pid });
+        return true;
+      }
+    } catch (e) { /* noop */ }
+    return false;
+  };
+
   // 队列跑完却没等到本节点的 executed（结果被缓存跳过 / 事件丢失）→ 解除按钮卡死
   const onApiStatus = (ev) => {
     try {
-      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn) return;
+      // submitting 卡 true 而按钮引用不匹配时也必须处理（v1.9.0-beta0 实测卡死路径：
+      // 事件丢失后响应写入 lastSubmitId，仅看按钮引用会永久跳过复位）。
+      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.submitting) return;
       const st = ev && ev.detail;
-      const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn);
+      const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
       const elapsedMs = Date.now() - (M.splitAt || 0);
       // 显式解析两种 status 负载；queue_remaining=0 必须命中（F2）
       if (shouldResetOnQueueIdle({ queueRemaining: queueRemaining(st), hasPending, elapsedMs })) {
-        fx.resetSplitBtn();
-        M.builtSig = M.pendSig = fx.currentSig();
-        M.els.status.textContent = "队列已空但未收到结果（可能被缓存跳过）：请再点一次";
-        M.els.status.className = "mps-status err";
+        healFromHistory().then((healed) => {
+          if (healed) return;  // processExecData 已写回并复位
+          try {
+            fx.resetSplitBtn();
+            M.builtSig = M.pendSig = fx.currentSig();
+            M.els.status.textContent = "队列已空但未收到结果（可能被缓存跳过）：请再点一次";
+            M.els.status.className = "mps-status err";
+          } catch (e) { /* noop */ }
+        });
       }
     } catch (e) { /* noop */ }
   };
