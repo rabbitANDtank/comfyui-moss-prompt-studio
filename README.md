@@ -17,7 +17,7 @@ LoadImage ──> ImageReverse（可选）──> Editor ──> Translator ─�
 ## 核心功能
 
 - **Editor：可视化画布**——拖拽/四角缩放/撤销重做、图层、重叠检测、比例与像素预设、16 倍数吸附、底图对比、实时校验；内置 📐 版式模板与文字容量提示。
-- **Editor：紧凑布局**——LLM/AI 选项双列；两个姿势参考框双列且可拖右下角调整高度；`ai_prompt` 可拖拽拉伸；图层面板默认折行显示完整 caption。
+- **Editor：紧凑布局**——LLM/AI 选项双列；姿势/服装参考框各自双列且可拖右下角调整高度；工具栏固定两行（⚡拆解 主色按钮在 ⇄同步/⧉复制 正下方）；`ai_prompt` 可拖拽拉伸；图层面板默认折行显示完整 caption。
 - **Translator：中→英**——OpenAI 兼容 LLM；`reuse_translation` 可复用上次成功译文，反复出图不重复计费；粘贴已编译 JSON 时用 `canvas_width`/`canvas_height` 反解真实画布坐标。
 - **Compiler：官方口径**——按 OpenMOSS/MOSS-Image 官方 skill 编译与严格校验；caption 输出纯文本，layout/已编译输出单行 JSON。
 - **ImageReverse（可选）**——图片 → 中文散文 / 中文草稿 / 画布 JSON；四档模式，默认关闭。
@@ -73,7 +73,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 | **Compiler** | 官方口径编译 + 严格校验 |
 | **ImageReverse** | 图片 → 中文散文 / 中文草稿 / 画布 JSON（可选入口，`enabled` 默认关闭） |
 
-> 最小主链只需 Editor → Translator → Compiler；ImageReverse 与姿势图库都是可选入口。
+> 最小主链只需 Editor → Translator → Compiler；ImageReverse 与姿势/服装图库都是可选入口。
 
 ## Editor 使用要点
 
@@ -91,6 +91,7 @@ custom_nodes/comfyui-moss-prompt-studio/
 - **姿势参考双列**：`pose_in`/`pose_in_2` 并排显示；两个框都可拖右下角调整高度，节点会自动重新分配空间；有连线时输入框自动禁用（连线优先）。
 - **服装参考双列**：`costume_in`/`costume_in_2` 紧随姿势面板；同样支持拖高、连线优先。新控件全部追加在姿势控件之后，旧工作流 `widgets_values` 不错位。
 - `ai_prompt` 也可拖右下角调整高度；面板会随内容重新布局。
+- **工具栏固定两行**：第一行 编辑工具 + 右端 `⇄同步`/`⧉复制`，第二行 注入/模板按钮 + 右端 **⚡拆解**（主色按钮，位于 同步/复制 正下方）。
 - 原标准 widget 被隐藏但仍参与工作流序列化，后端参数与 API 提交不变。
 - **旧 Editor 节点请删除后重新添加并重新连线**；旧节点/旧连线的布局兼容不在本次保证范围内。
 
@@ -151,10 +152,9 @@ custom_nodes/comfyui-moss-prompt-studio/
    - **注意混合**：📥服装只追加「；服装：」段；若画布 `summary`/角色描述里已写有旧衣服（反推草稿尤其常见），模型可能新旧混穿。检测到旧服装措辞时状态行会给出 ⚠；要彻底替换请用 ⚡拆解（LLM 会改写 summary 与角色服装）。
 4. 分配规则：单参考给最突出角色；双参考按 bbox 左右分配（左→`costume_in`，右→`costume_in_2`）；也可在画布选中角色后只注入它。服装没有“双人整体”语义。
 5. **不要**把 `Costume Gallery.image` 接到 `Editor.underlay`：underlay 是铺满画布的背景底图，不是 bbox 参考，而且会让 Editor 每次 Queue 都重跑。服装图只用于图库选择，不进主链路。
-6. 敏感分类提示：图库中「内衣 / 性感 / 泳装」共 393 条（27.9%）。走云端 LLM/翻译时请自行确认内容合规；插件会在 ⚡拆解/📥服装 状态行给出警告，但**不拦截**。
-7. 文字注入的服装保真度弱于图库自带的“三图参考换装”工作流（Qwen Image 2.1 图像参考）；本插件提供的是互补的文字控制能力，不承诺图库同款还原。具体控件与注入规则以节点 tooltip 为准。
+6. 敏感分类：「内衣 / 性感 / 泳装」共 393 条（27.9%）。⚠ 提示是尽力而为：手填或常量节点连线时可读到服装文本，⚡拆解/📥服装 状态行会提示；**直接连 `Costume Gallery.description`（计算输出）时前端读不到文本、可能不提示**（📥服装 的后端控制台仍会记录）。均不拦截，走云端 LLM/翻译前请自行确认内容合规。具体控件与注入规则以节点 tooltip 为准。
 
-> **costume-gallery 许可与免责**：其节点代码为 MIT（`LICENSE` 含 Scope 条款：仅覆盖代码/脚本；GitHub 因此识别为 `NOASSERTION`），服装图片、缩略图与原始数据不适用 MIT；原始素材作者 ギア（@giaaibusi），中文整理/上游 Deeyu（wangweihong 维护节点与桥接）。本插件不分发其素材，仅消费用户本地已安装节点的 `description` 文本输出；请阅读其 `LICENSE`、`NOTICE.md`、`THIRD_PARTY_NOTICES.md` 并保留署名。
+> costume-gallery 的许可与免责条款统一见文末「使用须知与免责声明」。
 
 ## 输入格式（上游契约）
 
@@ -175,7 +175,7 @@ node --test tests/*.test.mjs  # 128 用例（glob 自动包含所有前端测试
 
 ## 版本与更新
 
-- **v1.8.0**：新增可选服装注入（comfyui-costume-gallery `description → costume_in(_2)`、`costume_mode`、📥服装、🔄 对调两人服装）；caption 改为通用分段解析，姿势/服装/遮挡后缀可共存且互不删除；修复连续快速注入的结果误判（submit token）与反推草稿旧服装 object 残留；新增敏感分类/旧服装混合提示；⚡拆解 改为主色大按钮；Editor/Translator 画布宽高控件类型归一（旧工作流错位导致的"运行成功但不出图"）。Python **102** / Node **128**。
+- **v1.8.0**：新增可选服装注入（comfyui-costume-gallery `description → costume_in(_2)`、`costume_mode`、📥服装、🔄 对调两人服装）；caption 改为通用分段解析，姿势/服装/遮挡后缀可共存且互不删除；修复连续快速注入的结果误判（submit token）与反推草稿旧服装 object 残留；新增敏感分类/旧服装混合提示；⚡拆解 改为主色大按钮；Editor/Translator 画布宽高控件类型归一（旧工作流错位导致的「运行成功但不出图」）。Python **102** / Node **128**。
 - **v1.7.2**：Editor 布局更新（LLM/AI 选项双列、姿势框双列可调高、`ai_prompt` 可拉伸、图层全文折行）；Translator 译文缓存与非 1024 已编译输入（`canvas_width`/`canvas_height`）；P0 官方契约修正（caption 纯文本、空 `meta/tags/palette`、非 text `text`、bbox 精度）；修复 Python/JS 验证器分叉、队列结果归属/重复卡死/事务写回、SSRF 100.64/10、探测错误体限长、`agent_md` 删除锁死、检查器焦点、画布高度与指针清理。Python **90** / Node **112**。
 - **v1.7.1**：新增可选姿势注入节点并加固连接测试、缓存与资源生命周期。
 
@@ -191,7 +191,7 @@ node --test tests/*.test.mjs  # 128 用例（glob 自动包含所有前端测试
 
 本项目只提供提示词编辑、翻译和格式转换，本身不生成、不托管、不审核图像内容。请仅用于合法目的，并自行确保输入、生成内容和发布行为符合适用法律法规、目标平台条款及第三方模型/API 政策；API key 由你自行保管。
 
-本项目可选集成 comfyui-pose-gallery 与 comfyui-costume-gallery：其节点代码为 MIT（costume-gallery 的 `LICENSE` 含仅覆盖代码的 Scope 条款），姿势/服装图片、缩略图与原始数据不适用 MIT（权利归原作者 ギア，中文数据分别由 Anhao / Deeyu 整理）；本插件不分发其素材，使用者需自行遵守其 LICENSE/NOTICE 与上游条款。
+本项目可选集成 comfyui-pose-gallery 与 comfyui-costume-gallery：两者节点代码均为 MIT（costume-gallery 的 `LICENSE` 含仅覆盖代码/脚本的 Scope 条款，GitHub 因此把该仓库识别为 `NOASSERTION`）；姿势/服装图片、缩略图与原始数据均不适用 MIT——权利归原作者 ギア（@giaaibusi），中文数据分别由 Anhao（姿势）与 Deeyu（服装）整理，节点与中文版由 wangweihong 维护。本插件不分发这些素材：姿势侧仅运行时读取本地索引/缩略图，服装侧仅消费本地已安装节点输出的 `description` 文本；请阅读各仓库的 `LICENSE`/`NOTICE.md`/`THIRD_PARTY_NOTICES.md` 并保留署名。
 
 严禁用于制作或传播违法内容（包括 CSAM、非自愿色情、暴力、仇恨、骚扰、恐怖主义、诈骗、虚假信息，以及侵犯他人合法权益的内容），严禁绕过平台安全机制或冒充他人。AI 输出可能不准确或不合适，请自行审核并对使用结果负责；在适用法律允许的范围内，作者与贡献者不对任何直接或间接损失、法律责任或第三方索赔负责。本项目按 MIT 许可“按原样”提供，不附带任何担保；本声明不构成法律建议。
 
