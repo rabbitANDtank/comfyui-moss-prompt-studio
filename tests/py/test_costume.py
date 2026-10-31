@@ -219,6 +219,22 @@ def test_apply_costume_never_strips_text_items():
     assert len(out["items"]) == before
 
 
+def test_apply_costume_top_bottom_layout_assigns_upper_first():
+    """上下堆叠（x 中心接近）的双人：A 给上面的、B 给下面的——与 LLM 指令
+    "A to the upper one" 一致（审查 P2-6：此前本地按 x 排序会取 items 顺序，方向随机）。"""
+    from py.translate import apply_costume_to_draft
+    d = _mk_pose_draft()
+    d["items"] = [
+        # 上：x 中心 512；下：x 中心 512（|Δx|=0 < 5% 画布宽）→ 视为上下布局
+        {"label": "character", "caption": "上面的人物", "bbox": [200, 100, 824, 500]},
+        {"label": "character", "caption": "下面的人物", "bbox": [200, 520, 824, 920]},
+    ]
+    out = apply_costume_to_draft(d, COSTUME_A, COSTUME_B)
+    caps = [(it["caption"], it["label"]) for it in out["items"] if it.get("label") == "character"]
+    assert caps[0][0].endswith(COSTUME_A_PHRASE), f"上面的角色应得 A: {caps[0]}"
+    assert caps[1][0].endswith(COSTUME_B_PHRASE), f"下面的角色应得 B: {caps[1]}"
+
+
 def test_editor_costume_inputs_definition():
     opt = MOSSEditor.INPUT_TYPES()["optional"]
     assert opt["costume_in"][1].get("multiline") and opt["costume_in"][1].get("default") == ""

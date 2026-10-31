@@ -4,11 +4,11 @@ from __future__ import annotations
 try:
     from .caption_segments import COSTUME_MARKER, _set_caption_segment
     from .compile_prompt import validate_draft
-    from .inject_pose import _bbox_metrics
+    from .inject_pose import _bbox_metrics, _split_two_by_layout
 except ImportError:  # 兼容非包方式导入
     from caption_segments import COSTUME_MARKER, _set_caption_segment
     from compile_prompt import validate_draft
-    from inject_pose import _bbox_metrics
+    from inject_pose import _bbox_metrics, _split_two_by_layout
 
 COSTUME_MODES = ("自动", "关闭")
 COSTUME_SENSITIVE_CATEGORIES = ("内衣", "性感", "泳装")
@@ -208,8 +208,8 @@ def apply_costume_to_draft(draft: dict, costume_a: str, costume_b: str,
         by_area = sorted(chars, key=lambda i: _bbox_metrics(items[i])[1], reverse=True)
         if a and b:
             if len(chars) == 2:
-                left, right = sorted(chars, key=lambda i: _bbox_metrics(items[i])[0])
-                assignments += [(left, a), (right, b)]
+                first, second = _split_two_by_layout(draft, items, chars)
+                assignments += [(first, a), (second, b)]
             else:
                 assignments.append((by_area[0], a))
                 if len(by_area) > 1:

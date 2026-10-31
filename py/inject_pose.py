@@ -107,6 +107,28 @@ def _bbox_metrics(item: dict):
     return ((x0 + x1) / 2.0, (tier, w * h))
 
 
+def _bbox_center(b):
+    """bbox → (x 中心, y 中心)。非法输入返回 (inf, inf)（排序时沉底，与 _bbox_metrics 一致）。"""
+    try:
+        x0, y0, x1, y1 = (float(v) for v in b)
+    except (TypeError, ValueError):
+        return (float("inf"), float("inf"))
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+
+def _split_two_by_layout(draft: dict, items: list, chars):
+    """双人双参考的分配顺序（审查 P2-6）：x 中心接近（|Δx| < 画布宽 5%）视为
+    上下布局，按 y 中心升序返回（上→参考A、下→参考B），与 LLM 指令
+    _POSE/_COSTUME_ASSIGN_BOTH 的 "A to the upper one" 一致；否则按 x 中心
+    升序（左→A、右→B）。返回 (first_index, second_index)。"""
+    (ax, ay) = _bbox_center(items[chars[0]].get("bbox"))
+    (bx, by) = _bbox_center(items[chars[1]].get("bbox"))
+    width = float(draft.get("width") or 0) or 1.0
+    key = 1 if abs(ax - bx) < width * 0.05 else 0
+    first, second = sorted(chars, key=lambda i: _bbox_center(items[i].get("bbox"))[key])
+    return first, second
+
+
 def apply_pose_to_draft(draft: dict, pose_a: str, pose_b: str, mode: str = "自动",
                         target_index: int = -1) -> dict:
     """本地姿势注入（📥姿势按钮）：不调 LLM，把图库描述短语写入角色 caption。
@@ -153,9 +175,9 @@ def apply_pose_to_draft(draft: dict, pose_a: str, pose_b: str, mode: str = "自�
                 _pose_set_caption(items[i], pair_pose)
         elif a and b:
             if len(chars) == 2:
-                left, right = sorted(chars, key=lambda i: _bbox_metrics(items[i])[0])
-                _pose_set_caption(items[left], a)
-                _pose_set_caption(items[right], b)
+                first, second = _split_two_by_layout(draft, items, chars)
+                _pose_set_caption(items[first], a)
+                _pose_set_caption(items[second], b)
             else:
                 _pose_set_caption(items[by_area[0]], a)
                 if len(by_area) > 1:

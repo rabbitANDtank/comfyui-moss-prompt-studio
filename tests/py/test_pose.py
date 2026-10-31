@@ -47,6 +47,27 @@ def test_editor_pose_inputs_definition():
     assert list(modes) == ["自动", "强制双人", "关闭"] and meta["default"] == "自动"
 
 
+def test_apply_pose_top_bottom_layout_assigns_upper_first():
+    """上下堆叠（x 中心接近）的双人双参考：A 给上面的、B 给下面的——与 LLM 指令一致
+    （审查 P2-6：此前仅按 x 排序，x 相等时方向取决于 items 顺序）。"""
+    from py.translate import apply_pose_to_draft
+    d = _mk_pose_draft()
+    d["items"] = [
+        {"label": "character", "caption": "上面的人物", "bbox": [200, 100, 824, 500]},
+        {"label": "character", "caption": "下面的人物", "bbox": [200, 520, 824, 920]},
+    ]
+    out = apply_pose_to_draft(d, "双手叉腰站立（正面）", "双手背在身后（背面）")
+    caps = [(it["caption"], ) for it in out["items"] if it.get("label") == "character"]
+    assert caps[0][0].endswith("；姿势：双手叉腰站立（正面）"), f"上面的角色应得 A: {caps[0]}"
+    assert caps[1][0].endswith("；姿势：双手背在身后（背面）"), f"下面的角色应得 B: {caps[1]}"
+    # 左右布局回归：x 中心差异大时仍按左→A、右→B
+    d2 = _mk_pose_draft()
+    out2 = apply_pose_to_draft(d2, "双手叉腰站立（正面）", "双手背在身后（背面）")
+    caps2 = [(it["caption"]) for it in out2["items"] if it.get("label") == "character"]
+    assert caps2[0].endswith("；姿势：双手叉腰站立（正面）"), "左侧角色应得 A（回归）"
+    assert caps2[1].endswith("；姿势：双手背在身后（背面）"), "右侧角色应得 B（回归）"
+
+
 def test_locate_pose_catalog():
     import sys, tempfile, os as _os
     sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
