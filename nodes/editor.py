@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 try:
+    from ..py.dims import snap16
     from ..py.sniff import sniff
     from ..py.translate import (
         AGENT_DEFAULT,
@@ -26,6 +27,7 @@ try:
         source_signature,
     )
 except ImportError:  # 兼容非包方式导入
+    from py.dims import snap16
     from py.sniff import sniff
     from py.translate import (
         AGENT_DEFAULT,
@@ -41,11 +43,6 @@ except ImportError:  # 兼容非包方式导入
         resolve_endpoint,
         source_signature,
     )
-
-
-def _snap16(v, lo=64, hi=15360):
-    v = int(v)
-    return max(lo, min(hi, round(v / 16) * 16))
 
 
 class MOSSEditor:
@@ -109,6 +106,16 @@ class MOSSEditor:
             ensure_ascii=False, sort_keys=True, default=str,
         )
         return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, agent_md=None):
+        """绕过 agent_md 的动态 COMBO 校验（ComfyUI 会跳过本函数声明的输入）。
+
+        agents/*.md 被删除/改名后，旧值不在下拉列表里，ComfyUI 默认会在进入 run
+        之前报 "Value not in list"，节点内的友好报错不可达。真正存在性仍由
+        run() 里的 load_agent_md 校验并给出中文提示。
+        """
+        return True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -239,7 +246,7 @@ class MOSSEditor:
             key, _auth = resolve_api_key(provider, base_url or url, api_key, cfg)
             draft = prose_to_layout(
                 info["draft"]["caption"],
-                width=_snap16(canvas_width), height=_snap16(canvas_height),
+                width=snap16(canvas_width), height=snap16(canvas_height),
                 base_url=url, api_key=key, model=mdl,
                 temperature=temperature, thinking=thinking, provider=provider,
                 timeout=int(timeout), system_prompt=ai_prompt, agent_md=agent_md,
@@ -257,7 +264,7 @@ class MOSSEditor:
         if info["kind"] == "layout":
             out_w, out_h = int(info["draft"]["width"]), int(info["draft"]["height"])
         else:
-            out_w, out_h = _snap16(canvas_width), _snap16(canvas_height)
+            out_w, out_h = snap16(canvas_width), snap16(canvas_height)
 
         if underlay is not None:
             img = _save_underlay(underlay)

@@ -174,9 +174,10 @@ def _host_is_private(url: str) -> bool:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            # 任一解析结果落在私网即阻断（多 A/AAAA 记录不能只看第一条）
+        if not ip.is_global:
+            # 任一解析结果不是公网即阻断（多 A/AAAA 记录不能只看第一条）。
+            # 不用 is_private：100.64.0.0/10（运营商级 NAT）等共享地址段
+            # is_private=False 且 is_global=False，必须纳入阻断。
             return True
     return False
 
@@ -279,7 +280,8 @@ def _post_once(url: str, key: str, body: dict, timeout: int) -> dict:
             status = resp.status
             raw = resp.read(_MAX_RESPONSE)
     except urllib.error.HTTPError as e:
-        detail = _sanitize(e.read().decode("utf-8", "replace"), key)
+        # 错误体同样限长：恶意/故障端点可能返回数 GB 的 4xx/5xx body
+        detail = _sanitize(e.read(_MAX_RESPONSE).decode("utf-8", "replace"), key)
         retry_after = e.headers.get("Retry-After") if e.headers else None
         msg = _error_message(detail)
         if e.code == 429 and retry_after:

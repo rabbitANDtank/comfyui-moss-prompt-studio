@@ -29,7 +29,7 @@ class MOSSCompiler:
     RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "STRING")
     RETURN_NAMES = ("prompt", "negative", "width", "height", "clip_text")
     OUTPUT_TOOLTIPS = (
-        "单行紧凑 JSON，接 MOSS-Image 文本编码节点的正向提示词",
+        "caption 形态为官方纯文本；layout/已编译形态为单行紧凑 JSON；直接接 MOSS-Image 文本编码节点",
         "官方推荐负向提示词（可改）",
         "layout 取草稿宽高；caption/已编译优先取 canvas_width 连线，未连线才用本节点 width widget",
         "同上",
@@ -75,7 +75,9 @@ class MOSSCompiler:
             cap = obj.get("caption")
             if not isinstance(cap, str) or not cap.strip():
                 raise SniffError("caption 必须是非空字符串")
-            prompt = json_dumps_compact({"caption": cap})
+            # 官方 caption 编译产物是纯文本（compile_prompt.py 的 caption 分支）；
+            # 不要包 {"caption":...} JSON，否则与官方口径不一致。
+            prompt = cap
             # caption / 已编译形态的 JSON 里没有尺寸：优先用 Editor 连线过来的宽高，否则用本节点 widget。
             w, h = _resolve_size(canvas_width, canvas_height, width, height)
         elif kind == "draft":
@@ -101,9 +103,3 @@ def _linked_dim(v, name: str) -> int:
     if not isinstance(v, int) or isinstance(v, bool) or v <= 0 or v % 16 != 0:
         raise SniffError(f"{name} 必须是 16 的正整数倍（当前 {v!r}）；请接 Editor 的 width/height 输出")
     return int(v)
-
-
-def json_dumps_compact(o) -> str:
-    import json
-
-    return json.dumps(o, ensure_ascii=False, separators=(",", ":"), allow_nan=False)

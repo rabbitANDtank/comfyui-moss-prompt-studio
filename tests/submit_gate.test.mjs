@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode,
+  isDuplicateDraft, resultAttributionDecision,
 } from "../web/js/editor/submit_gate.js";
 
 // F2：status 负载解析（0 必须命中，不能用 `0 || ...`）
@@ -47,4 +48,76 @@ test("queueHasNode reads the 3rd tuple item (prompt object)", () => {
   assert.equal(queueHasNode([[0, "225", { "999": {} }]], "225"), false);
   // 畸形条目
   assert.equal(queueHasNode([null, "x", [0, "pid"], [0, "pid", null]], "225"), false);
+});
+
+// P1：结果到达后无论是否重复都必须复位提交状态；去重只影响是否写回画布。
+test("resultAttributionDecision resets pending state for normal, duplicate and stale results", () => {
+  const base = { promptId: "pid-1", lastSubmitId: "pid-1", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:aaaa" };
+  assert.deepEqual(resultAttributionDecision(base), {
+    outcome: "accept", write: true, resetPending: true, notify: false,
+  });
+  const dup = resultAttributionDecision({ ...base, duplicate: true });
+  assert.equal(dup.outcome, "duplicate");
+  assert.equal(dup.write, false);
+  assert.equal(dup.resetPending, true, "重复投递也必须复位提交状态/按钮");
+
+  const stale = resultAttributionDecision({ ...base, currentSig: "fnv1a:bbbb" });
+  assert.equal(stale.outcome, "stale");
+  assert.equal(stale.write, false);
+  assert.equal(stale.resetPending, true, "stale 结果同样结束本次提交等待");
+});
+
+// P1：prompt_id 必须匹配最近一次提交；同 source 二次提交也不能被旧结果写回。
+test("resultAttributionDecision matches prompt_id of the latest submission", () => {
+  // 当前提交 → 接受
+  assert.equal(resultAttributionDecision({
+    promptId: "pid-2", lastSubmitId: "pid-2", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:aaaa",
+  }).outcome, "accept");
+  // 旧提交（即使 source 签名完全相同）→ 丢弃，且不解除本次等待
+  const old = resultAttributionDecision({
+    promptId: "pid-1", lastSubmitId: "pid-2", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:aaaa",
+  });
+  assert.equal(old.outcome, "foreign");
+  assert.equal(old.write, false);
+  assert.equal(old.resetPending, false);
+  assert.equal(old.notify, true);
+  // 同 source 二次提交：旧 prompt_id 的结果不能因为签名相同被采纳
+  assert.equal(resultAttributionDecision({
+    promptId: "pid-old", lastSubmitId: "pid-new", currentSig: "fnv1a:same", pendingSig: "fnv1a:same",
+  }).write, false);
+});
+
+// P1：无 prompt_id（旧前端 onExecuted）或最近提交已复位时回退到签名判断。
+test("resultAttributionDecision falls back to source/pending signatures without prompt_id", () => {
+  // 无 prompt_id，ui.mps_src_sig 与当前 source 一致 → 接受（保持旧行为）
+  assert.equal(resultAttributionDecision({
+    lastSubmitId: "pid-1", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:aaaa",
+  }).outcome, "accept");
+  // ui.mps_src_sig 不一致 → stale
+  assert.equal(resultAttributionDecision({
+    lastSubmitId: "pid-1", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:bbbb",
+  }).outcome, "stale");
+  // uiSig 缺失 → pending 兜底
+  assert.equal(resultAttributionDecision({ currentSig: "fnv1a:bbbb", pendingSig: "fnv1a:bbbb" }).outcome, "accept");
+  assert.equal(resultAttributionDecision({ currentSig: "fnv1a:bbbb", pendingSig: "fnv1a:aaaa" }).outcome, "stale");
+  // ws 字符数组归一
+  assert.equal(resultAttributionDecision({
+    uiSig: ["fnv1a:a", "aaa"], currentSig: "fnv1a:aaaa",
+  }).outcome, "accept");
+  // 最近提交已复位（lastSubmitId 为空）+ 完整 Queue 结果 → 回退签名，不误杀
+  assert.equal(resultAttributionDecision({
+    promptId: "pid-from-full-queue", lastSubmitId: "", uiSig: "fnv1a:aaaa", currentSig: "fnv1a:aaaa",
+  }).outcome, "accept");
+});
+
+// P1：双通道去重只在“同一次投递”上生效，不能吞掉两次提交的同文结果。
+test("isDuplicateDraft distinguishes dual-channel replay from two real submissions", () => {
+  const base = { lastText: "DRAFT", lastAt: 1000, text: "DRAFT", now: 1500 };
+  assert.equal(isDuplicateDraft(base), true, "无 prompt_id 的旧路径 + 新路径 = 同一结果");
+  assert.equal(isDuplicateDraft({ ...base, lastPid: "pid-1", promptId: "pid-1" }), true);
+  assert.equal(isDuplicateDraft({ ...base, lastPid: "", promptId: "pid-2" }), true, "至少一方无 pid 视为双通道");
+  assert.equal(isDuplicateDraft({ ...base, lastPid: "pid-1", promptId: "pid-2" }), false, "不同提交的同文结果不得去重");
+  assert.equal(isDuplicateDraft({ ...base, text: "OTHER" }), false);
+  assert.equal(isDuplicateDraft({ ...base, now: 4000 }), false, "超出 2s 窗口");
+  assert.equal(isDuplicateDraft({ ...base, text: "" }), false, "空结果不做重复判定");
 });

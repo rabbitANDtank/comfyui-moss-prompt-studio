@@ -79,8 +79,10 @@ export function parseSourceText(text, width = 1024, height = 1024) {
 }
 
 function checkStrList(v, name, errs) {
-  if (!Array.isArray(v) || !v.length || !v.every((x) => typeof x === "string" && x.trim())) {
-    errs.push(`${name} 必须是非空字符串数组`);
+  // 与 py/compile_prompt._check_str_list 对齐：官方 strings() 允许空数组，
+  // 只要求每个元素是非空字符串；空数组不要误判成非法。
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string" && x.trim())) {
+    errs.push(`${name} 必须是字符串数组（元素不能为空）`);
   }
 }
 
@@ -147,7 +149,11 @@ export function validateDraft(S) {
       errs.push(`${pre} 是 text 元素但 text 为空`);
     }
     if (it.label !== "text" && "text" in it) {
-      errs.push(`${pre} 不是 text 元素不应有 text`);
+      // 与 py/compile_prompt._validate_item 对齐：官方编译器允许非 text item
+      // 携带 text（只要求非空字符串），不再在前端提前拒绝。
+      if (typeof it.text !== "string" || !it.text.trim()) {
+        errs.push(`${pre}.text 必须是非空字符串`);
+      }
     }
     if ("tags" in it) checkStrList(it.tags, `${pre}.tags`, errs);
     if ("palette" in it) checkStrList(it.palette, `${pre}.palette`, errs);
@@ -198,6 +204,29 @@ export function clampArea(W, H, minArea = 250000, maxArea = 4000000) {
     h = Math.max(64, grid((h * f) / 16) * 16);
   }
   return [w, h];
+}
+
+/**
+ * 画布显示尺寸（纯几何）：在可用宽高内等比放下画布，显示高度上限跟随底部调整条
+ * （M.canvasH）与画布区实际可用高度，而不是写死 540px —— 否则往下拖高度条只会
+ * 增加画布区空白。保留最小/最大显示高度，宽幅图仍以宽度优先、不被拉伸。
+ */
+export function fitCanvasDisplay({ availW, availH, W, H, canvasH, minH = 160, maxH = 1600 } = {}) {
+  const w0 = Number(W), h0 = Number(H);
+  if (!(w0 > 0) || !(h0 > 0)) return { width: 0, height: 0 };
+  const aw = Math.max(1, Number(availW) || 0);
+  const ah = Math.max(1, Number(availH) || 0);
+  const wanted = Number(canvasH) > 0 ? Number(canvasH) : ah;
+  const capped = Math.min(maxH, Math.max(minH, wanted));
+  // 可用高度是硬约束（避免溢出画布区），M.canvasH 只在其内决定目标高度。
+  const limit = Math.min(ah, capped);
+  let width = aw;
+  let height = (width * h0) / w0;
+  if (height > limit) {
+    height = limit;
+    width = (height * w0) / h0;
+  }
+  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
 }
 
 export function clampBox(b, W, H) {

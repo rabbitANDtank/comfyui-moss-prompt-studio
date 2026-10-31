@@ -32,8 +32,9 @@ def _is_num(v) -> bool:
 
 
 def _check_str_list(v, name: str):
-    if not isinstance(v, list) or not v or not all(isinstance(x, str) and x.strip() for x in v):
-        _fail(f"{name} 必须是非空字符串数组")
+    # 官方 strings() 允许空数组；只要求每个元素是非空字符串。
+    if not isinstance(v, list) or not all(isinstance(x, str) and x.strip() for x in v):
+        _fail(f"{name} 必须是字符串数组（元素不能为空）")
     return v
 
 
@@ -97,6 +98,22 @@ def validate_draft(d: dict, check_bounds: bool = True):
     return w, h
 
 
+def _check_text_field(pre: str, it: dict):
+    """text 字段契约（草稿与已编译形态必须一致）。
+
+    官方编译器允许非 text item 携带 text（只要求非空字符串）；两种形态都用本函数，
+    避免已编译 JSON 因多一个非空 text 字段被拒。
+    """
+    if it["label"] == "text":
+        txt = it.get("text")
+        if not isinstance(txt, str) or not txt.strip():
+            _fail(f"{pre} 是 text 元素，text 字段必填且不能为空（画面可见文字，按原文保留）")
+    elif "text" in it:
+        txt = it.get("text")
+        if not isinstance(txt, str) or not txt.strip():
+            _fail(f"{pre}.text 必须是非空字符串")
+
+
 def _validate_item(i: int, it, w: int, h: int, check_bounds: bool):
     pre = f"items[{i}]"
     if not isinstance(it, dict):
@@ -112,23 +129,25 @@ def _validate_item(i: int, it, w: int, h: int, check_bounds: bool):
     if not isinstance(it["caption"], str) or not it["caption"].strip():
         _fail(f"{pre}.caption 不能为空")
     _check_bbox(it["bbox"], pre, w, h, check_bounds)
-    if it["label"] == "text":
-        txt = it.get("text")
-        if not isinstance(txt, str) or not txt.strip():
-            _fail(f"{pre} 是 text 元素，text 字段必填且不能为空（画面可见文字，按原文保留）")
-    elif "text" in it:
-        _fail(f"{pre} 不是 text 元素，不应携带 text 字段")
+    _check_text_field(pre, it)
     for key in ("tags", "palette"):
         if key in it:
             _check_str_list(it[key], f"{pre}.{key}")
 
 
 def compile_bbox(b, w: int, h: int):
-    """abs/xyxy（左上原点）→ abs_centralized/yxyx（中心原点），边缘 floor/ceil。"""
+    """abs/xyxy（左上原点）→ abs_centralized/yxyx（中心原点）。
+
+    与官方一致：先 round(v, 9) 再 floor/ceil，避免浮点误差导致 1px 偏差；
+    编译后若框塌缩（宽或高 <= 0）则拒绝。
+    """
     x0, y0, x1, y1 = b
-    x0, y0 = math.floor(x0), math.floor(y0)
-    x1, y1 = math.ceil(x1), math.ceil(y1)
-    return [y0 - h // 2, x0 - w // 2, y1 - h // 2, x1 - w // 2]
+    x0, y0 = math.floor(round(x0, 9)), math.floor(round(y0, 9))
+    x1, y1 = math.ceil(round(x1, 9)), math.ceil(round(y1, 9))
+    result = [y0 - h // 2, x0 - w // 2, y1 - h // 2, x1 - w // 2]
+    if not (result[0] < result[2] and result[1] < result[3]):
+        _fail(f"bbox 在编译精度下塌缩: {b}")
+    return result
 
 
 def compile_draft(d: dict) -> str:
@@ -207,10 +226,8 @@ def validate_compiled(c: dict) -> str:
             _fail(f"{pre}.bbox y 顺序非法（y0 必须小于 y1）: {b}")
         if not x0 < x1:
             _fail(f"{pre}.bbox x 顺序非法（x0 必须小于 x1）: {b}")
-        if it["label"] == "text" and (not isinstance(it.get("text"), str) or not it["text"].strip()):
-            _fail(f"{pre} 是 text 元素，text 必填")
-        if it["label"] != "text" and "text" in it:
-            _fail(f"{pre} 不是 text 元素，不应携带 text 字段")
+        # 与 validate_draft 一致：text item 必填；非 text item 允许携带非空 text
+        _check_text_field(pre, it)
         for key in ("tags", "palette"):
             if key in it:
                 _check_str_list(it[key], f"{pre}.{key}")

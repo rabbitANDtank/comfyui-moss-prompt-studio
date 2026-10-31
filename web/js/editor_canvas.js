@@ -13,17 +13,25 @@ import {
   VALID_LABELS, VALID_CANVAS, OCCL_FRONT, OCCL_BACK,
   detectKind, reverseCompiled, validateDraft as validateJS,
   parseSourceText, snapshotOf, serializeDraft,
-  clampDim, clampArea, clampBox, csvParse, csvShow, sourceSignature,
+  clampDim, clampArea, clampBox, csvParse, csvShow, sourceSignature, fitCanvasDisplay,
 } from "./editor/model.js";
 import { editorFlushRegistry, mountEditorLifecycle, mountCompilerSync } from "./editor/comfy-hooks.js";
 import { parseReverseRecord, reverseDecision, reverseRecord, textHash } from "./editor/reverse.js";
-import { draftSourceAttribution, editsOwnerSignature, rebuildCandidates } from "./editor/source_guard.js";
-import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode } from "./editor/submit_gate.js";
+import { editsOwnerSignature, rebuildCandidates } from "./editor/source_guard.js";
+import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, queueHasNode,
+  isDuplicateDraft, resultAttributionDecision } from "./editor/submit_gate.js";
+import { commitDraftWriteback } from "./editor/result_writeback.js";
+import { flushFocusedField } from "./editor/focus_guard.js";
+import { bindPointerDrag } from "./editor/pointer_drag.js";
 import { POSE_MARKER, poseMarkedItems, swapPoseSegments, buildSplitPayload,
   normalizePoseMode, normalizeApplyPose, normalizePoseText, resolvePoseSource,
   poseSourceLabel, poseWriteTarget, poseSourceWritable } from "./editor/pose.js";
 import { buildFacets, filterPoses, groupByPose, toDescription, poseThumbUrl } from "./editor/pose_picker.js";
+import { listTemplates } from "./editor/templates.js";
+import { estimateTextFit, estimatePromptTokens, lintTextItems, TOKEN_WARN_LIMIT } from "./editor/text_fit.js";
 import { syncLlmConfig, warnApiKeyIfSet, bindApiKeyWarn } from "./editor/llm_config.js";
+import { mountLlmOptions } from "./editor/llm_options.js";
+import { mountPoseInputs } from "./editor/pose_inputs.js";
 
 console.log("[MOSS Studio] Editor 画布扩展已加载 (size-sync v5 / auto-wire)");
 
@@ -83,11 +91,11 @@ const CSS = `
 .mps-sw input[type=color]{position:absolute;inset:0;width:100%;height:100%;border:none;padding:0;background:none;cursor:pointer;}
 .mps-sw .mps-swx{position:absolute;top:-1px;right:0;width:11px;height:11px;line-height:10px;text-align:center;font-size:9px;color:#fff;background:#000a;border-radius:2px;cursor:pointer;opacity:0;}
 .mps-sw:hover .mps-swx{opacity:1;}
-.mps-layer{display:flex;gap:4px;align-items:center;padding:2px 4px;border-radius:4px;cursor:pointer;}
+.mps-layer{display:flex;gap:4px;align-items:flex-start;padding:3px 4px;border-radius:4px;cursor:pointer;}
 .mps-layer:hover{background:#2e2e2e;}
 .mps-layer.sel{background:#37517a;}
-.mps-layer .dot{width:8px;height:8px;border-radius:2px;flex:0 0 8px;}
-.mps-layer .cap{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;}
+.mps-layer .dot{width:8px;height:8px;border-radius:2px;flex:0 0 8px;margin-top:4px;}
+.mps-layer .cap{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.35;font-size:11px;}
 .mps-mini{background:#333;color:#ddd;border:1px solid #4a4a4a;border-radius:3px;padding:0 5px;font-size:11px;cursor:pointer;}
 .mps-mini:hover{background:#454545;}
 .mps-overlap-pair{margin:4px 0;padding:4px;background:#1b1b1b;border-radius:4px;font-size:11px;}
@@ -176,6 +184,10 @@ function init(node) {
   }
   if (typeof node.addDOMWidget !== "function") { console.warn("[MOSS Studio] 当前前端不支持 addDOMWidget，画布未启用"); return; }
   sanitizeAgentMd(node);
+  // LLM/AI 配置改成独立双列 DOM 面板；原 widget 隐藏但仍参与序列化。
+  try { mountLlmOptions(node); } catch (e) { console.warn("[MOSS Studio] LLM 选项面板挂载失败", e); }
+  // 两个姿势参考框同样改为双列 DOM 面板，带原生 resize 手柄。
+  try { mountPoseInputs(node); } catch (e) { console.warn("[MOSS Studio] 姿势参考面板挂载失败", e); }
 
   if (node.size[0] < 860 || node.size[1] < 900) node.size = [Math.max(node.size[0], 860), Math.max(node.size[1], 900)];
 
@@ -274,6 +286,8 @@ function init(node) {
   // 🎯姿势①/②：从图库点选姿势（体系/分类/视角筛选 + 关键词搜索），写入 pose_in widget
   mkBtn("🎯姿势①", () => openPosePicker(1), "打开姿势库点选面板（需已安装 comfyui-pose-gallery）：按体系/分类/视角筛选或搜索，点视角按钮选用，写入 pose_in。也可在 widget 里手填或连线");
   mkBtn("🎯姿势②", () => openPosePicker(2), "同 🎯姿势①，写入 pose_in_2（双人分别指定姿势时给另一角色）");
+  // 📐模板：内置自建版式（官方 draft schema），载入后走 adoptEdits 写回并保留撤销点
+  mkBtn("📐模板", () => openTemplatePanel(), "打开内置版式模板库（自建示例版式）：竖版海报/方形社媒/电商主图/杂志封面/人物介绍卡/四格分镜。载入会写入编辑画布，可 ↶撤销");
   mkBtn("⟲重置", () => { if (confirm("重置为粘贴源并丢弃画布编辑？")) rebuildFromWidgets({ preferEdits: false, clearEditsOnEmpty: true }); },
     "重置为 source 粘贴源：丢弃当前画布编辑并清空 edits（会二次确认；不能用 ↶撤销 恢复）");
 
@@ -347,12 +361,9 @@ function init(node) {
       side.style.flexBasis = w + "px";
       layoutCanvas();
     };
-    const onUp = () => {
-      vdiv.removeEventListener("pointermove", onMove);
-      vdiv.removeEventListener("pointerup", onUp);
-    };
-    vdiv.addEventListener("pointermove", onMove);
-    vdiv.addEventListener("pointerup", onUp);
+    // 结束清理覆盖 pointerup/pointercancel/lostpointercapture：拖拽中切窗
+    // 或指针捕获丢失时也能停掉 pointermove，避免 hover 继续改侧栏宽度（P2）。
+    bindPointerDrag(vdiv, { onMove });
   });
 
   root.appendChild(toolbar);
@@ -381,12 +392,8 @@ function init(node) {
       node.setDirtyCanvas?.(true, true);
       layoutCanvas();
     };
-    const onUp = () => {
-      sizer.removeEventListener("pointermove", onMove);
-      sizer.removeEventListener("pointerup", onUp);
-    };
-    sizer.addEventListener("pointermove", onMove);
-    sizer.addEventListener("pointerup", onUp);
+    // 同侧栏分隔条：pointercancel/lostpointercapture 也要结束拖拽（P2）
+    bindPointerDrag(sizer, { onMove });
   });
   root.appendChild(sizer);
 
@@ -402,7 +409,7 @@ function init(node) {
     // source 归属（P0-1）：stateSrcSig=当前画布对应的 source 签名；split/pose/queueSrcSig=
     // 已提交但尚未回来的异步结果对应的 source 签名；lastDraft*=双通道去重。
     stateSrcSig: "", splitSrcSig: "", poseSrcSig: "", queueSrcSig: "",
-    lastDraftText: "", lastDraftAt: 0,
+    lastDraftText: "", lastDraftAt: 0, lastDraftPid: "",
     // F3/F4：提交互斥 / 最近一次拆解-注入的 prompt_id / 资源句柄
     submitting: false, lastSubmitId: "", poseLinkWarned: false,
     queueTimer: null, ro: null,
@@ -552,7 +559,7 @@ function init(node) {
     }, 350);
   }
 
-  function adoptEdits(showErrors = true) {
+  function adoptEdits(showErrors = true, opts = {}) {
     clearTimeout(M.editsCb);
     const raw = (wEdits.value || "").trim();
     M.editsDirty = false;
@@ -571,8 +578,11 @@ function init(node) {
     const pre = M.S ? snapshot() : null;
     M.S = next;
     M.stateSrcSig = currentSourceSig();
-    M.sel = null; M.undo = []; M.redo = [];
-    if (pre) pushUndo(pre);
+    M.sel = null;
+    // 手改 edits 默认重开撤销栈；模板载入等调用方已自行压入撤销点时保留历史
+    if (!opts.keepUndo) M.undo = [];
+    M.redo = [];
+    if (pre && !opts.preRecorded) pushUndo(pre);
     syncWidgets(); renderAll(); updateToolbar(); hideMsg();
     // 用户手改 edits 是明确意图：把这份内容归属到当前 source，后端继续以 edits 为准
     setSourceSig(M.stateSrcSig);
@@ -786,13 +796,14 @@ function init(node) {
     canvas.style.display = isLayout ? "" : "none";
     capBox.style.display = M.S && M.S.kind === "caption" ? "" : "none";
     if (!isLayout) return;
-    const avail = Math.max(160, canvasWrap.clientWidth - 18);
     const Wd = M.S.d.width, Hd = M.S.d.height;
-    let dw = avail, dh = (dw * Hd) / Wd;
-    const maxH = 540;
-    if (dh > maxH) { dh = maxH; dw = (dh * Wd) / Hd; }
-    canvas.style.width = dw + "px";
-    canvas.style.height = dh + "px";
+    // 显示高度跟随底部调整条（M.canvasH）与画布区实际可用高度，不再写死 540px；
+    // 否则把高度条拖到 3000 只会在画布下面增加空白（P2）。
+    const availW = Math.max(160, canvasWrap.clientWidth - 18);
+    const availH = Math.max(120, (canvasWrap.clientHeight || Math.max(420, M.canvasH || 660)) - 18);
+    const display = fitCanvasDisplay({ availW, availH, W: Wd, H: Hd, canvasH: M.canvasH });
+    canvas.style.width = display.width + "px";
+    canvas.style.height = display.height + "px";
   }
 
   function renderBoxes() {
@@ -853,7 +864,7 @@ function init(node) {
       dot.style.background = COLORS[it.label] || "#999";
       const cap = document.createElement("span");
       cap.className = "cap";
-      cap.textContent = `${i}·${it.label} ${(it.caption || "").slice(0, 16)}`;
+      cap.textContent = `${i}·${it.label} ${it.caption || ""}`;
       cap.title = it.caption || "";
       row.appendChild(dot); row.appendChild(cap);
       const mk = (t, fn, title) => {
@@ -956,6 +967,10 @@ function init(node) {
   const setOptArr = (obj, key) => (a) => { if (a.length) obj[key] = a; else delete obj[key]; };
 
   function renderInspector() {
+    // P2：重绘会清空 insp，浏览器移除聚焦元素时不一定派发 blur，bindField 的
+    // blur 处理（writeEdits + pushUndo）会丢失，300ms 防抖内的编辑可能未落盘。
+    // 选中其他框/图层前先主动 flush 当前字段，再重建检查器。
+    flushFocusedField(typeof document !== "undefined" ? document.activeElement : null, insp);
     const isLayout = !!(M.S && M.S.kind === "layout");
     M.els.pnlInsp.style.display = M.S ? "" : "none";
     insp.innerHTML = "";
@@ -1031,8 +1046,21 @@ function init(node) {
       insp.appendChild(h5("text 画面可见文字（保留原文，勿译）"));
       const tx = document.createElement("textarea");
       tx.className = "mps-textarea"; tx.rows = 2; tx.value = it.text || "";
-      bindField(tx, (v) => { it.text = v; });
+      // 容量估算小字：输入时实时刷新（只提示，不限制编辑）
+      const fitHint = document.createElement("div");
+      fitHint.style.cssText = "font-size:11px;margin-top:2px;line-height:1.4;";
+      const paintFitHint = () => {
+        const fit = estimateTextFit(it);
+        if (!fit) { fitHint.textContent = ""; fitHint.style.color = "#8a8a8a"; return; }
+        const box = `${Math.round(fit.width)}×${Math.round(fit.height)}px`;
+        const base = `约 ${Math.round(fit.fontSize)}px 字号 · ${fit.lines} 行 · 框 ${box}`;
+        fitHint.style.color = fit.ok ? "#8a8a8a" : "#ffb0b0";
+        fitHint.textContent = fit.ok ? `容量估算：${base}` : `⚠ 容量不足：${base}`;
+      };
+      paintFitHint();
+      bindField(tx, (v) => { it.text = v; paintFitHint(); });
       insp.appendChild(tx);
+      insp.appendChild(fitHint);
     }
     // tags：该元素的属性标签（常驻可添加）
     insp.appendChild(h5("tags 元素标签"));
@@ -1102,18 +1130,37 @@ function init(node) {
     }
   }
 
+  // 文字容量 / token 预算的软提示：只做 warning，不参与官方 validateDraft。
+  function statusWarnings() {
+    if (!M.S) return [];
+    const warns = [];
+    if (M.S.kind === "layout") {
+      for (const l of lintTextItems(M.S.d)) warns.push(l.message);
+    }
+    const promptText = M.S.kind === "caption" ? M.S.caption : JSON.stringify(M.S.d);
+    const tokens = estimatePromptTokens(promptText);
+    if (tokens > TOKEN_WARN_LIMIT) {
+      warns.push(`提示词粗估约 ${tokens} tokens（>${TOKEN_WARN_LIMIT}），可能超出预算`);
+    }
+    return warns;
+  }
+
   function updateStatus() {
     const errs = validateJS(M.S);
     if (!M.S) { status.className = "mps-status"; status.textContent = "—"; return; }
     const head = M.S.kind === "caption"
       ? `📨 散文式提示词已收到（${M.S.caption.length} 字）· 目标 ${+wCw.value || 1024}×${+wCh.value || 1024}` + (wAi && wAi.value ? " · ⚡AI 拆解已启用：Queue 一次生成布局画布" : " · 点 ⚡拆解 生成画布")
       : `布局 ${M.S.d.width}×${M.S.d.height} · ${M.S.d.items.length} 项 · 选中 ${M.sel == null ? "—" : M.sel}`;
+    const warns = statusWarnings();
+    const warnLine = warns.length
+      ? "\n⚠ " + warns[0] + (warns.length > 1 ? `（另有 ${warns.length - 1} 条提示）` : "")
+      : "";
     if (errs.length) {
       status.className = "mps-status err";
-      status.textContent = `${head}\n⚠ ${errs.length} 个问题：` + errs.slice(0, 3).join("；") + (errs.length > 3 ? " …" : "");
+      status.textContent = `${head}\n⚠ ${errs.length} 个问题：` + errs.slice(0, 3).join("；") + (errs.length > 3 ? " …" : "") + warnLine;
     } else {
       status.className = "mps-status ok";
-      status.textContent = `${head} · ✓ 校验通过`;
+      status.textContent = `${head} · ✓ 校验通过` + warnLine;
     }
   }
 
@@ -1182,8 +1229,14 @@ function init(node) {
 
   function restore(s) {
     const o = JSON.parse(s);
-    if (M.S && M.S.kind === "caption") M.S.caption = o.caption;
-    else M.S = { kind: "layout", d: o };
+    const keys = Object.keys(o || {});
+    // caption 快照只有 {"caption":...}；从布局撤销回散文（或反向）时按快照形态恢复，
+    // 避免把 caption 快照误当 layout.d 导致 items 缺失。
+    if (keys.length === 1 && keys[0] === "caption" && typeof o.caption === "string") {
+      M.S = { kind: "caption", caption: o.caption };
+    } else {
+      M.S = { kind: "layout", d: o };
+    }
     if (M.sel != null && M.S.kind === "layout" && M.sel >= M.S.d.items.length) M.sel = null;
     syncWidgets(); renderAll(); writeEdits();
   }
@@ -1470,6 +1523,12 @@ function init(node) {
       }
       sanitizeAgentMd(this);
       rebindWidgets();
+      try {
+        node._mpsLlmOptions?.hideWidgets();
+        node._mpsLlmOptions?.refresh();
+        node._mpsPoseInputs?.hideWidgets();
+        node._mpsPoseInputs?.refresh();
+      } catch (e) { /* noop */ }
       try { warnApiKeyIfSet(node, showKeyWarn); } catch (e) { /* noop */ }
       // 工作流切换/重新 configure 兜底：清掉可能卡住的提交状态（F2）
       resetSplitBtn();
@@ -1499,49 +1558,90 @@ function init(node) {
     },
   });
   // 执行结果处理：底图上屏 + AI 拆解写回。
-  // 兼容两种消息形态（ui 字典本体 / 包一层 .ui）与两条投递路径（旧前端 onExecuted / 新前端 api 事件总线）
+  // 兼容两种消息形态（ui 字典本体 / 包一层 .ui）与两条投递路径（旧前端 onExecuted /
+  // 新前端 api 事件总线）。meta.promptId：新前端 executed 事件带的提交 id（旧前端没有）。
   let lastImgName = null;
-  function processExecData(data) {
+  function processExecData(data, meta = {}) {
     if (!data) return;
     if (data.mps_draft !== undefined) {
       // ComfyUI 4.9 的 ws 会把长字符串拆成单字符数组传输，归一成字符串
-      let md = Array.isArray(data.mps_draft) ? data.mps_draft.join("") : data.mps_draft;
+      const md = Array.isArray(data.mps_draft) ? data.mps_draft.join("") : data.mps_draft;
       if (typeof md === "string" && md.trim()) {
         // 双通道去重：旧前端 onExecuted 与新前端 api executed 可能各投递一次。
         // 迟到结果若被第一条路径丢弃，不能在第二条路径又以“无提交记录”被采纳。
         const now = Date.now();
-        const dupDraft = M.lastDraftText === md && now - (M.lastDraftAt || 0) < 2000;
+        const curPid = meta.promptId ? String(meta.promptId) : "";
+        // 同一结果的双通道投递才去重：不同 prompt_id 的同文结果（旧提交 vs
+        // 本次提交）不得被去重误杀，否则真正属于本次提交的结果会被丢弃。
+        const dupDraft = isDuplicateDraft({
+          lastText: M.lastDraftText, lastAt: M.lastDraftAt, lastPid: M.lastDraftPid,
+          text: md, now, promptId: curPid,
+        });
         M.lastDraftText = md;
         M.lastDraftAt = now;
-        if (!dupDraft) {
-          // 结果归属（F3）：后端回传 mps_src_sig 时严格比较（结果自带归属）；
-          // 缺失时回退到内存 pending（旧后端/旧工作流）。
-          const curSig = currentSourceSig();
-          const pendingSig = M.poseBtn ? M.poseSrcSig : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig);
-          const uiSrcSig = Array.isArray(data.mps_src_sig) ? data.mps_src_sig.join("") : data.mps_src_sig;
-          const stale = draftSourceAttribution({
-            uiSig: uiSrcSig, currentSig: curSig, pendingSig,
-          }) === "stale";
-          // 本次结果是否为 📥姿势 注入：必须在 resetSplitBtn 清掉按钮前判断（F5）
-          const isPoseResult = !!M.poseBtn
-            || (!!M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt);
-          resetSplitBtn();
-          if (stale) {
-            M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
-            // 当前 source 的有效画布不能被丢掉：preferEdits=true 先尝试 owner 匹配的 edits；
-            // 只有全部候选解析失败时才按原逻辑清理旧 edits（F8）
-            try { rebuildFromWidgets({ preferEdits: true }); } catch (e) { /* noop */ }
-            rememberRun("⚠ 拆解/注入结果对应旧 source，已丢弃旧画布；请对新 source 重新拆解", "err");
+        M.lastDraftPid = curPid;
+        // 结果归属（F3/P1）：后端回传 mps_src_sig 时严格比较；新前端事件带
+        // prompt_id 时还必须匹配最近一次手工提交（完整 Queue/旧提交的结果丢弃）。
+        const curSig = currentSourceSig();
+        const pendingSig = M.poseBtn ? M.poseSrcSig : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig);
+        const uiSrcSig = Array.isArray(data.mps_src_sig) ? data.mps_src_sig.join("") : data.mps_src_sig;
+        const decision = resultAttributionDecision({
+          promptId: meta.promptId,
+          lastSubmitId: M.lastSubmitId,
+          uiSig: uiSrcSig,
+          currentSig: curSig,
+          pendingSig,
+          duplicate: dupDraft,
+        });
+        // 本次结果是否为 📥姿势 注入：必须在 resetSplitBtn 清掉按钮前判断（F5）
+        const isPoseResult = !!M.poseBtn
+          || (!!M.posePendingAt && Date.now() - M.posePendingAt < 30000 && !M.splitPendingAt);
+        // P1：结果到达（含重复/过期）就结束本次提交等待；否则 M.submitting 会一直
+        // 否决 Queue/Ctrl+Enter 直到 180s 兜底。去重只决定是否再次写回画布。
+        if (decision.resetPending) resetSplitBtn();
+        if (decision.outcome === "duplicate") {
+          // 双通道第二次投递：提交状态已复位，不重复写回
+        } else if (decision.outcome === "foreign") {
+          // prompt_id 不属于最近一次提交：丢弃内容，但保持等待本次提交的结果
+          if (decision.notify) {
+            rememberRun("⚠ 收到不属于最近一次提交的结果，已丢弃；仍在等待本次提交", "err");
+          }
+        } else if (decision.outcome === "stale") {
+          M.posePendingAt = 0; M.splitPendingAt = 0; M.posePairHint = false;
+          // 当前 source 的有效画布不能被丢掉：preferEdits=true 先尝试 owner 匹配的 edits；
+          // 只有全部候选解析失败时才按原逻辑清理旧 edits（F8）
+          try { rebuildFromWidgets({ preferEdits: true }); } catch (e) { /* noop */ }
+          rememberRun("⚠ 拆解/注入结果对应旧 source，已丢弃旧画布；请对新 source 重新拆解", "err");
+        } else {
+          // P2：先解析/结构校验到临时对象，成功后才写 edits 并重建；失败保留
+          // 旧画布与旧 edits（不再把坏 JSON 留在 widget 里）。
+          const written = commitDraftWriteback({
+            raw: md,
+            getEdits: () => wEdits.value,
+            setEdits: (v) => {
+              wEdits.value = v;
+              if (wEdits.inputEl) wEdits.inputEl.value = v;
+            },
+            rebuild: () => {
+              // 📥姿势 结果支持 ↶撤销：先记录注入前画布；拆解/换源仍清空 undo（F5）
+              if (isPoseResult && M.S) {
+                try { pushUndo(snapshot()); } catch (e) { /* noop */ }
+              }
+              return rebuildFromEdits(curSig, { keepUndo: isPoseResult });
+            },
+          });
+          if (!written.ok) {
+            M.els.status.textContent = "拆解/注入结果不是合法草稿，已保留原画布：" + written.error;
+            M.els.status.className = "mps-status err";
+            rememberRun("❌ 结果解析失败，已保留原画布；请重试或检查 LLM 输出", "err");
           } else {
-            // 📥姿势 结果支持 ↶撤销：先记录注入前画布；拆解/换源仍清空 undo（F5）
-            if (isPoseResult && M.S) {
-              try { pushUndo(snapshot()); } catch (e) { /* noop */ }
-            }
-            wEdits.value = md;
-            rebuildFromEdits(curSig, { keepUndo: isPoseResult });
-            try { reportDraftArrived(JSON.parse(md)); } catch (e) { /* 状态提示尽力而为 */ }
+            try { reportDraftArrived(written.draft); } catch (e) { /* 状态提示尽力而为 */ }
           }
         }
+      } else if (M.submitting || M.splitBtn || M.poseBtn) {
+        // 空草稿同样是“结果到达”：复位提交状态，避免永久否决 Queue（P1）
+        resetSplitBtn();
+        rememberRun("⚠ 收到空草稿结果，已复位提交状态；请重试", "err");
       }
     }
     const imgs = data.images;
@@ -1567,6 +1667,101 @@ function init(node) {
     M.splitSrcSig = "";
     M.poseSrcSig = "";
     M.submitting = false;
+    // 最近一次手工提交也随本次提交结束而失效：之后到达的完整 Queue 结果没有
+    // 匹配对象，回退到 mps_src_sig/pending 判断，不会被 prompt_id 误杀（P1）。
+    M.lastSubmitId = "";
+  }
+
+  // ---------- 版式模板库（自建示例数据） ----------
+  // 模板数据在 editor/templates.js（纯逻辑、Node 测试覆盖）；这里只负责面板 DOM 与
+  // 载入路径。载入走 adoptEdits：edits widget 保留 2 空格缩进的模板 JSON，
+  // M.S / edits_source_sig / 撤销栈保持一致，source 为空时不会被 700ms 轮询覆盖。
+  function closeTemplatePanel() {
+    const old = root.querySelector(".mps-templatepicker");
+    if (old) old.remove();
+  }
+
+  function openTemplatePanel() {
+    closePosePicker();
+    closeTemplatePanel();
+    const panel = document.createElement("div");
+    panel.className = "mps-templatepicker";
+    panel.style.cssText = "border:1px solid #3a4a5a;border-radius:8px;background:#1a2026;margin:4px 0;padding:8px;";
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px;";
+    const title = document.createElement("span");
+    title.style.cssText = "color:#9bb7d4;font-weight:600;";
+    title.textContent = "📐 版式模板（自建示例）";
+    const info = document.createElement("span");
+    info.style.cssText = "color:#888;font-size:11px;flex:1;";
+    info.textContent = "占位文案仅作示例，载入后按需修改；可 ↶撤销";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "mps-mini";
+    closeBtn.textContent = "✕ 关闭";
+    closeBtn.title = "关闭模板面板";
+    closeBtn.addEventListener("click", closeTemplatePanel);
+    head.append(title, info, closeBtn);
+    panel.appendChild(head);
+    const list = document.createElement("div");
+    list.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:6px;";
+    panel.appendChild(list);
+    for (const t of listTemplates()) {
+      const card = document.createElement("div");
+      card.style.cssText = "border:1px solid #333;border-radius:6px;padding:6px;background:#20262b;display:flex;flex-direction:column;gap:4px;";
+      const nameEl = document.createElement("div");
+      nameEl.style.cssText = "color:#ddd;font-weight:600;font-size:12px;";
+      nameEl.textContent = t.name;
+      const metaEl = document.createElement("div");
+      metaEl.style.cssText = "color:#8fb3d9;font-size:11px;";
+      metaEl.textContent = `${t.draft.width}×${t.draft.height} · ${t.draft.items.length} 项 · ${t.draft.summary.canvas || "single"}`;
+      const descEl = document.createElement("div");
+      descEl.style.cssText = "color:#999;font-size:11px;line-height:1.4;";
+      descEl.textContent = t.description;
+      const useBtn = document.createElement("button");
+      useBtn.className = "mps-mini";
+      useBtn.textContent = "使用";
+      useBtn.style.alignSelf = "flex-start";
+      useBtn.title = "载入该版式到编辑画布（会先记录撤销点）";
+      useBtn.addEventListener("click", () => applyTemplate(t));
+      card.append(nameEl, metaEl, descEl, useBtn);
+      list.appendChild(card);
+    }
+    root.insertBefore(panel, runStatus);
+  }
+
+  function applyTemplate(t) {
+    if (!t || !t.draft) return;
+    if (!rebindWidgets()) {
+      status.textContent = "模板载入失败：Editor widget 不完整";
+      status.className = "mps-status err";
+      return;
+    }
+    const raw = JSON.stringify(t.draft, null, 2);
+    const hadCanvas = !!M.S;
+    const same = hadCanvas && M.S.kind === "layout"
+      && JSON.stringify(M.S.d) === JSON.stringify(t.draft);
+    if (same) {
+      status.textContent = `已载入模板：${t.name}（与当前画布相同）`;
+      status.className = "mps-status";
+      closeTemplatePanel();
+      return;
+    }
+    // 先记录载入前的画布；adoptEdits 会按 preRecorded 跳过重复压栈，保留完整撤销历史
+    const prevEdits = wEdits ? wEdits.value : "";
+    if (hadCanvas) pushUndo(snapshot());
+    setWidgetInput(wEdits, raw);
+    const ok = adoptEdits(true, { keepUndo: hadCanvas, preRecorded: true });
+    if (!ok) {
+      if (hadCanvas && M.undo.length) M.undo.pop();
+      setWidgetInput(wEdits, prevEdits);
+      status.textContent = "模板载入失败：模板数据无法解析";
+      status.className = "mps-status err";
+      return;
+    }
+    status.textContent = `已载入模板：${t.name}${hadCanvas ? "（可 ↶撤销）" : ""}`;
+    status.className = "mps-status ok";
+    updateToolbar();
+    closeTemplatePanel();
   }
 
   // ---------- 姿势库点选面板（v1.7.1） ----------
@@ -1643,6 +1838,7 @@ function init(node) {
   }
 
   function openPosePicker(slot) {
+    closeTemplatePanel();
     closePosePicker();
     const panel = document.createElement("div");
     panel.className = "mps-posepicker";
@@ -1678,6 +1874,7 @@ function init(node) {
           // Editor widget 同步一份镜像：以后断开连线仍保留最近点选值
           w.value = desc;
           if (w.inputEl) w.inputEl.value = desc;
+          try { node._mpsPoseInputs?.refresh(); } catch (e) { /* noop */ }
           closePosePicker();
           setRun(`🎯 姿势${slot === 1 ? "①" : "②"}已选择：${item.system}·${item.name}（${item.view}）——已写入 ${label}（连线保留）`, "ok");
           return;
@@ -1698,6 +1895,7 @@ function init(node) {
         }
         w.value = desc;
         if (w.inputEl) w.inputEl.value = w.value;
+        try { node._mpsPoseInputs?.refresh(); } catch (e) { /* noop */ }
         closePosePicker();
         setRun(`🎯 姿势${slot === 1 ? "①" : "②"}已选择：${item.system}·${item.name}（${item.view}）——已写入 ${name}${disconnected ? "（已断开覆盖用连线）" : ""}`, "ok");
       });
@@ -2122,7 +2320,12 @@ function init(node) {
 
   const prevExec = node.onExecuted;
   node.onExecuted = function (info) {
-    try { processExecData(info && (info.ui || info)); } catch (e) { /* noop */ }
+    // 新前端同时会发带 prompt_id 的 api executed 事件；legacy 路径没有 prompt_id，
+    // 若让它先跑会绕过提交归属（同 source 的旧结果/完整 Queue 结果可能被误收）。
+    // 因此只在没有 api 事件总线时回退到 legacy；prevExec 始终保留给其他扩展。
+    if (!M.apiHooked) {
+      try { processExecData(info && (info.ui || info)); } catch (e) { /* noop */ }
+    }
     if (prevExec) return prevExec.call(this, info);
   };
   const onApiExecuted = (ev) => {
@@ -2130,21 +2333,26 @@ function init(node) {
       const d = ev && ev.detail;
       if (!d) return;
       if (String(d.node) !== String(node.id) && String(d.display_node) !== String(node.id)) return;
-      // F3：只做对照日志，不改行为（全流程 Queue 的 prompt_id 与最近一次拆解不同属正常）
-      if (d.prompt_id && M.lastSubmitId && String(d.prompt_id) !== String(M.lastSubmitId)) {
-        console.debug("[MPS] executed prompt_id mismatch", { prompt_id: d.prompt_id, lastSubmitId: M.lastSubmitId });
+      const promptId = d.prompt_id ? String(d.prompt_id) : "";
+      // P1：新前端事件带 prompt_id 时，与最近一次手工提交匹配；完整 Queue/旧提交
+      // 的结果不能写回本次画布（source 相同也不行），也不解除本次等待。
+      const pidMismatch = !!promptId && !!M.lastSubmitId && promptId !== String(M.lastSubmitId);
+      if (pidMismatch) {
+        console.debug("[MPS] executed prompt_id mismatch", { prompt_id: promptId, lastSubmitId: M.lastSubmitId });
       }
       const out = d.output && (d.output.ui || d.output);
       // 本节点执行完却没带回新草稿（例如 edits 透传 / 输入没变被缓存）：
       // 解除"⏳拆解中/⏳注入中"，别让按钮挂着等一个不会来的结果。
       const ui = out || {};
       if ((M.splitBtn || M.poseBtn) && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
+        // 不是本次手工提交的执行（完整 Queue 透传等）：保持等待，别提前复位
+        if (pidMismatch) return;
         resetSplitBtn();
         M.els.status.textContent = "本次执行没有产生新草稿（源可能没变化被缓存）。改一下 source 再试，或点 ⟲重置";
         M.els.status.className = "mps-status err";
         return;
       }
-      processExecData(out);
+      processExecData(out, { promptId });
     } catch (e) { /* noop */ }
   };
   // 新前端里 nodeCreated 发生得很早，app.api 可能尚未就位：先尝试挂载，轮询里补挂

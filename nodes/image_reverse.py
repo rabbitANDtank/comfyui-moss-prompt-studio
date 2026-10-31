@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 try:
+    from ..py.dims import snap16
     from ..py.translate import (
         AGENT_DEFAULT,
         agent_md_widget_options,
@@ -32,6 +33,7 @@ try:
         reverse_image_to_prompt,
     )
 except ImportError:  # 兼容非包方式导入
+    from py.dims import snap16
     from py.translate import (
         AGENT_DEFAULT,
         agent_md_widget_options,
@@ -50,11 +52,6 @@ except ImportError:  # 兼容非包方式导入
         image_signature,
         reverse_image_to_prompt,
     )
-
-
-def _snap16(v, lo=64, hi=15360):
-    v = int(v)
-    return max(lo, min(hi, round(v / 16) * 16))
 
 
 # caption_detail 详细定义见 py/vision.py 的 CAPTION_DETAIL_INSTRUCTIONS。
@@ -236,6 +233,16 @@ class MOSSImageReverse:
         return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
     @classmethod
+    def VALIDATE_INPUTS(cls, agent_md=None):
+        """绕过 agent_md 的动态 COMBO 校验（ComfyUI 会跳过本函数声明的输入）。
+
+        agents/*.md 被删除/改名后，旧值不在下拉列表里，ComfyUI 默认会在进入 run
+        之前报 "Value not in list"，节点内的友好报错不可达。真正存在性仍由
+        run() 里的 load_agent_md 校验并给出中文提示。
+        """
+        return True
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
@@ -370,8 +377,8 @@ class MOSSImageReverse:
         if shape is None or len(shape) < 2:
             raise ValueError("图像反推节点：无法读取输入图像尺寸")
         src_h, src_w = int(shape[0]), int(shape[1])
-        tw = _snap16(canvas_width) if int(canvas_width or 0) > 0 else _snap16(src_w)
-        th = _snap16(canvas_height) if int(canvas_height or 0) > 0 else _snap16(src_h)
+        tw = snap16(canvas_width) if int(canvas_width or 0) > 0 else snap16(src_w)
+        th = snap16(canvas_height) if int(canvas_height or 0) > 0 else snap16(src_h)
 
         b64, mime, nbytes, _, _ = encode_image(
             first, max_side=opts["image_max_side"], quality=opts["image_quality"]

@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from py.compile_prompt import DraftError, compile_draft, validate_compiled, validate_draft  # noqa: E402
+from py.compile_prompt import DraftError, compile_bbox, compile_draft, validate_compiled, validate_draft  # noqa: E402
 from py.sniff import SniffError, sniff, strict_loads  # noqa: E402
 from py.translate import (  # noqa: E402
     AGENT_DEFAULT,
@@ -55,7 +55,7 @@ from py.vision_probe import (  # noqa: E402
 from nodes.compiler import MOSSCompiler  # noqa: E402
 from nodes.editor import MOSSEditor  # noqa: E402
 from nodes.image_reverse import MOSSImageReverse, resolve_reverse_options  # noqa: E402
-from nodes.translator import MOSSTranslator  # noqa: E402
+from nodes.translator import MOSSTranslator, clear_translation_cache  # noqa: E402
 
 # ---------- 官方示例数据 ----------
 
@@ -139,8 +139,15 @@ def test_validate_rejects():
     _expect(DraftError, validate_draft, bad)                             # 越界
     bad = copy.deepcopy(CUP); del bad["items"][1]["text"]
     _expect(DraftError, validate_draft, bad)                             # text 元素缺 text
-    bad = copy.deepcopy(CUP); bad["items"][0]["text"] = "不该有"
-    _expect(DraftError, validate_draft, bad)                             # 非 text 元素带 text
+    # 官方允许空 meta/tags/palette 数组、允许非 text item 携带 text
+    ok = copy.deepcopy(CUP)
+    ok["summary"]["meta"] = []
+    ok["summary"]["palette"] = []
+    ok["items"][0]["tags"] = []
+    ok["items"][0]["palette"] = []
+    ok["items"][0]["text"] = "官方允许的附带文字"
+    validate_draft(ok)
+    compile_draft(ok)
     bad = copy.deepcopy(CUP); bad["items"][0]["caption"] = "  "
     _expect(DraftError, validate_draft, bad)                             # 空 caption
     bad = copy.deepcopy(CUP); bad["items"] = []
@@ -152,6 +159,48 @@ def test_validate_rejects():
     _expect(DraftError, validate_compiled, badc)                              # y0 必须小于 y1
     badc = copy.deepcopy(COMPILED_POSTER); badc["items"][0]["bbox"] = [-416, 384, -288, -384]
     _expect(DraftError, validate_compiled, badc)                              # x0 必须小于 x1
+
+
+def test_compiled_contract_matches_draft():
+    """草稿与已编译形态的 text/meta/tags/palette 规则必须一致。
+
+    validate_draft 允许空 meta/tags/palette 与非 text item 携带非空 text；
+    validate_compiled 以前会拒绝后者，导致 compile_draft 的合法产物无法回环。
+    """
+    d = copy.deepcopy(CUP)
+    d["summary"]["meta"] = []
+    d["summary"]["palette"] = []
+    d["items"][0]["tags"] = []
+    d["items"][0]["palette"] = []
+    d["items"][0]["text"] = "官方允许的附带文字"
+
+    # 空数组与非 text item 的 text 在草稿形态合法
+    validate_draft(d)
+    compiled_str = compile_draft(d)
+    compiled = json.loads(compiled_str)
+    assert compiled["items"][0]["text"] == "官方允许的附带文字"
+    assert compiled["summary"]["meta"] == [] and compiled["summary"]["palette"] == []
+    assert compiled["items"][0]["tags"] == [] and compiled["items"][0]["palette"] == []
+
+    # 已编译形态必须接受同样的字段，且无损回环
+    assert validate_compiled(compiled) == compiled_str
+    assert json.loads(validate_compiled(json.loads(compiled_str))) == compiled
+
+    # 契约只放宽“非 text item 可携带 text”，空 text 仍必须拒绝
+    bad = copy.deepcopy(compiled)
+    bad["items"][0]["text"] = "  "
+    _expect(DraftError, validate_compiled, bad)
+    # text item 缺 text 仍必须拒绝
+    bad = copy.deepcopy(compiled)
+    del bad["items"][1]["text"]
+    _expect(DraftError, validate_compiled, bad)
+
+
+def test_compile_bbox_official_rounding():
+    """官方先 round(v, 9) 再 floor/ceil；编译后塌缩的框必须拒绝。"""
+    assert compile_bbox([0.9999999999, 0.9999999999, 2.0, 2.0], 16, 16) == [-7, -7, -6, -6]
+    _expect(DraftError, compile_bbox,
+            [0.0000000001, 0.0000000001, 0.0000000002, 0.0000000002], 16, 16)
 
 
 def test_sniff_forms_and_roundtrip():
@@ -203,13 +252,13 @@ def test_editor_node():
 
 def test_compiler_node():
     node = MOSSCompiler()
-    # caption 形态：紧凑输出 + widget 兜底尺寸
+    # caption 形态：官方纯文本输出 + widget 兜底尺寸
     p, n, w, h, ct = node.run('{"caption":"你好"}', "neg", 832, 1216)
-    assert (p, n, w, h) == ('{"caption":"你好"}', "neg", 832, 1216)
+    assert (p, n, w, h) == ('你好', "neg", 832, 1216)
     assert ct == p, "clip_text 默认不含负向"
     # 勾选拼接负向
     _, _, _, _, ct2 = node.run('{"caption":"你好"}', "neg", 832, 1216, True)
-    assert ct2 == '{"caption":"你好"}, neg'
+    assert ct2 == '你好, neg'
     # layout 形态：编译 + 草稿尺寸
     p, n, w, h, ct = node.run(json.dumps(CUP, ensure_ascii=False), "neg", 512, 512)
     assert json.loads(p)["items"][0]["bbox"] == [-288, -592, 352, 32]
@@ -402,10 +451,11 @@ def _start_sequence(responses):
     return srv
 
 
-def _run_translator(base_url):
+def _run_translator(base_url, reuse_translation=False):
     return MOSSTranslator().run(
         json.dumps(DRAFT_ZH, ensure_ascii=False), "custom", base_url, "mock",
         "EMPTY", 0.3, "off", 30, "", "", None,
+        reuse_translation=reuse_translation,
     )
 
 
@@ -601,6 +651,36 @@ def test_agent_md_widget_selection():
                 os.unlink(p)
 
 
+def test_agent_md_validate_inputs_bypasses_combo_layer():
+    """三个 LLM 节点的 agent_md 是动态 COMBO（agents/*.md）。
+
+    删除/改名文件后旧值不在下拉列表里，ComfyUI 默认在进入 run 之前报
+    "Value not in list"，节点内的友好报错不可达。VALIDATE_INPUTS 必须在
+    argspec 中声明 agent_md（ComfyUI 据此跳过该输入的 combo/min/max 校验），
+    对任意字符串返回 True；真实存在性仍由 load_agent_md 在运行时友好报错。
+    """
+    import inspect
+
+    from py.translate import load_agent_md
+
+    deleted = "__test_deleted_agent__.md"
+    for cls in (MOSSEditor, MOSSTranslator, MOSSImageReverse):
+        fn = cls.VALIDATE_INPUTS
+        argspec = inspect.getfullargspec(fn)
+        # 对齐 ComfyUI execution.validate_inputs 的跳过条件：
+        #   x not in validate_function_inputs and not validate_has_kwargs
+        assert "agent_md" in argspec.args, \
+            f"{cls.__name__}.VALIDATE_INPUTS 必须声明 agent_md 才能跳过 combo 校验"
+        assert argspec.varkw is None, \
+            f"{cls.__name__} 不要用 **kwargs，避免连带跳过其他输入的默认校验"
+        assert fn(deleted) is True
+        assert fn("任意/不存在 的.md") is True
+        assert fn() is True, "缺省/旧工作流无 agent_md 时也必须通过"
+
+    # 运行时照旧做真实存在性校验，并给出中文友好错误
+    _expect(TranslationError, load_agent_md, deleted)
+
+
 def test_http_first_try_success():
     srv = _start_mock()
     try:
@@ -609,6 +689,143 @@ def test_http_first_try_success():
         assert json.loads(out) == GOOD_EN and MockHandler.hits == 1
     finally:
         srv.shutdown()
+
+
+def test_translator_reuses_cached_translation_when_enabled():
+    """reuse_translation=True：相同翻译输入第二次直接复用，不再请求 LLM。"""
+    clear_translation_cache()
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(GOOD_EN, ensure_ascii=False),
+                             json.dumps(GOOD_EN, ensure_ascii=False)]
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        out1 = _run_translator(url, reuse_translation=True)[0]
+        out2 = _run_translator(url, reuse_translation=True)[0]
+        assert out1 == out2
+        assert MockHandler.hits == 1, "第二次应复用缓存，不再请求 LLM"
+    finally:
+        srv.shutdown()
+        clear_translation_cache()
+
+
+def test_translator_cache_invalidates_on_draft_change():
+    """草稿变化 → 缓存 key 变化 → 重新翻译。"""
+    clear_translation_cache()
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(GOOD_EN, ensure_ascii=False)] * 2
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        _run_translator(url, reuse_translation=True)
+        draft2 = copy.deepcopy(DRAFT_ZH)
+        draft2["summary"]["caption"] = "另一张极简海报，蓝色山脉。"
+        MOSSTranslator().run(
+            json.dumps(draft2, ensure_ascii=False), "custom", url, "mock",
+            "EMPTY", 0.3, "off", 30, "", "", None, reuse_translation=True,
+        )
+        assert MockHandler.hits == 2, "草稿变化应重新翻译"
+    finally:
+        srv.shutdown()
+        clear_translation_cache()
+
+
+def test_translator_reuse_off_forces_fresh_and_refreshes_cache():
+    """关闭时强制重译并刷新缓存；再打开复用最近一次译文。"""
+    clear_translation_cache()
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(GOOD_EN, ensure_ascii=False)] * 3
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        _run_translator(url, reuse_translation=False)
+        _run_translator(url, reuse_translation=False)
+        _run_translator(url, reuse_translation=True)
+        assert MockHandler.hits == 2, "关闭时每次都翻译；打开后复用关闭时最后一次结果"
+    finally:
+        srv.shutdown()
+        clear_translation_cache()
+
+
+def test_translator_is_changed_tracks_reuse_switch():
+    """开关本身要进 IS_CHANGED，切换后节点才会重新执行以决定读缓存/强制翻译。"""
+    args = ('{"caption":"x"}', "custom", "http://x/v1", "m", "EMPTY", 0.3, "off", 30, "", "")
+    h0 = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, reuse_translation=False)
+    h1 = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, reuse_translation=True)
+    assert h0 != h1
+    assert MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, reuse_translation=True) == h1
+
+
+def test_translator_reuse_widget_is_appended():
+    """新开关必须追加在旧 widget 之后，旧工作流 widgets_values 不错位。"""
+    req = [k for k in MOSSTranslator.INPUT_TYPES()["required"] if k != "draft"]
+    opt = [k for k in MOSSTranslator.INPUT_TYPES()["optional"] if k != "extra_instructions"]
+    # canvas_width/height 追加在 reuse_translation 之后（译已编译 JSON 时反解坐标用）
+    assert (req + opt)[-4:] == ["agent_md", "reuse_translation",
+                                "canvas_width", "canvas_height"]
+    assert (req + opt)[-1] == "canvas_height"
+
+
+def test_translator_compiled_non_1024_canvas():
+    """Translator 的已编译输入必须按 canvas_width/height 反解，不能固定 1024。
+
+    1536x1024 草稿编译后，中心原点 bbox 超出 1024 反解范围：旧实现会先调 LLM，
+    再在 check_translation 的完整边界校验阶段失败（白跑 3 次）。修复后应一次成功。
+    """
+    clear_translation_cache()
+    compiled = compile_draft(CUP)  # 1536x1024 → 单行已编译 JSON
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(CUP, ensure_ascii=False)]
+        (out,) = MOSSTranslator().run(
+            compiled, "custom", f"http://127.0.0.1:{srv.server_address[1]}/v1", "mock",
+            "EMPTY", 0.3, "off", 30, "", "", None,
+            reuse_translation=False, canvas_width=1536, canvas_height=1024,
+        )
+        assert json.loads(out) == CUP
+        assert MockHandler.hits == 1, "非 1024 已编译输入应在一次调用内通过校验"
+        sent = MockHandler.requests[0]
+        user = sent["messages"][1]["content"]
+        draft_sent = json.loads(user[user.index("{"):])
+        assert (draft_sent["width"], draft_sent["height"]) == (1536, 1024)
+        for it in draft_sent["items"]:
+            x0, y0, x1, y1 = it["bbox"]
+            assert 0 <= x0 < x1 <= 1536, f"反解 x 越界: {it['bbox']}"
+            assert 0 <= y0 < y1 <= 1024, f"反解 y 越界: {it['bbox']}"
+    finally:
+        srv.shutdown()
+        clear_translation_cache()
+
+
+def test_translator_canvas_dimensions_affect_cache_and_is_changed():
+    """canvas_width/height 必须进 IS_CHANGED 与翻译缓存键。"""
+    args = (json.dumps(DRAFT_ZH, ensure_ascii=False), "custom", "http://x/v1", "m",
+            "EMPTY", 0.3, "off", 30, "", "")
+    h_small = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, False, 1024, 1024)
+    h_large = MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, False, 1536, 1024)
+    assert h_small != h_large, "画布尺寸变化必须让节点重新执行"
+    assert MOSSTranslator.IS_CHANGED(*args, AGENT_DEFAULT, None, False,
+                                     1024, 1024) == h_small
+
+    clear_translation_cache()
+    srv = _start_mock()
+    try:
+        MockHandler.queue = [json.dumps(GOOD_EN, ensure_ascii=False)] * 2
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        _run_translator(url, reuse_translation=True)  # 默认 1024x1024
+        MOSSTranslator().run(
+            json.dumps(DRAFT_ZH, ensure_ascii=False), "custom", url, "mock",
+            "EMPTY", 0.3, "off", 30, "", "", None,
+            reuse_translation=True, canvas_width=1536, canvas_height=1024,
+        )
+        assert MockHandler.hits == 2, "画布尺寸变化后不得命中旧译文缓存"
+        # 相同尺寸与输入 → 复用缓存，不再请求 LLM
+        MOSSTranslator().run(
+            json.dumps(DRAFT_ZH, ensure_ascii=False), "custom", url, "mock",
+            "EMPTY", 0.3, "off", 30, "", "", None,
+            reuse_translation=True, canvas_width=1536, canvas_height=1024,
+        )
+        assert MockHandler.hits == 2
+    finally:
+        srv.shutdown()
+        clear_translation_cache()
 
 
 def test_http_retry_success():
@@ -2010,6 +2227,97 @@ def test_host_is_private_fails_closed_on_dns_error():
         _socket.getaddrinfo = orig
 
 
+def test_host_is_private_blocks_non_global_ranges():
+    """P2：100.64/10 等共享地址段 is_private=False 但 is_global=False，必须阻断。
+
+    旧实现对每个 IP 只检查 is_private/is_loopback/is_link_local/is_reserved/...，
+    会放行 100.64.0.1 这类运营商级 NAT 地址；改为 not is_global 后统一阻断。
+    """
+    import socket as _socket
+
+    from py.vision_probe import _host_is_private
+
+    orig = _socket.getaddrinfo
+
+    def _resolves(ip):
+        return lambda *a, **kw: [
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (ip, 0)),
+        ]
+
+    try:
+        # 非公网地址（共享地址段）→ 阻断
+        for ip in ("100.64.0.1", "100.100.100.200", "0.0.0.0", "198.18.0.1"):
+            _socket.getaddrinfo = _resolves(ip)
+            assert _host_is_private("http://shared.example/v1") is True, ip
+        # 公网地址 → 放行
+        _socket.getaddrinfo = _resolves("8.8.8.8")
+        assert _host_is_private("http://public.example/v1") is False
+        # 多 IP：任一非公网即阻断
+        _socket.getaddrinfo = lambda *a, **kw: [
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("100.64.0.1", 0)),
+        ]
+        assert _host_is_private("http://mixed.example/v1") is True
+        # DNS 失败仍 fail-closed
+        def _raise_gaierror(*a, **kw):
+            raise _socket.gaierror("name resolution failed")
+
+        _socket.getaddrinfo = _raise_gaierror
+        assert _host_is_private("http://attacker.invalid/v1") is True
+        # run_probe 在禁止私网时同样拒绝（不发起网络请求）
+        d = run_probe({
+            "provider": "custom", "base_url": "http://shared.example/v1",
+            "model": "mock", "api_key": "EMPTY", "thinking": "off", "timeout": 10,
+        }, allow_config_key=False, allow_private_targets=False)
+        assert d["ok"] is False and d["error_type"] == "forbidden_target"
+    finally:
+        _socket.getaddrinfo = orig
+
+
+def test_probe_http_error_body_read_is_capped():
+    """P2：探测的 HTTPError 分支只能读取 _MAX_RESPONSE，不能无限读错误体。"""
+    import email.message
+    import urllib.error
+
+    import py.vision_probe as vp
+
+    class RecordingBody(io.BytesIO):
+        def __init__(self, data):
+            super().__init__(data)
+            self.read_sizes = []
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    huge = b"x" * (2 * vp._MAX_RESPONSE)
+    body = RecordingBody(huge)
+    err = urllib.error.HTTPError(
+        "http://example.invalid/v1/chat/completions", 500, "Server Error",
+        email.message.Message(), body,
+    )
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            raise err
+
+    orig = vp._opener
+    vp._opener = lambda: FakeOpener()
+    try:
+        d = _post_once("http://example.invalid/v1/chat/completions", "test-key",
+                       {"model": "m"}, 5)
+    finally:
+        vp._opener = orig
+
+    assert body.read_sizes == [vp._MAX_RESPONSE], \
+        f"错误体必须按上限读取，实际请求 {body.read_sizes}"
+    assert d["ok"] is False and d["status"] == 500
+    assert d["error_type"] == "upstream_error"
+    # 超长非 JSON 错误体 → 稳定的截断信息（300 字消息 + 501 字 detail）
+    assert d["message"] == "x" * 300
+    assert len(d["detail"]) == 501
+
+
 def test_probe_error_classification():
     # MiniMax 400 + 2013 unknown model → model_or_endpoint_not_found（不再误补文本 ping）
     srv = _start_recording([(400, {"base_resp": {
@@ -2472,6 +2780,8 @@ def test_pose_catalog_route_cache():
 TESTS = [
     test_compile_official_examples,
     test_validate_rejects,
+    test_compiled_contract_matches_draft,
+    test_compile_bbox_official_rounding,
     test_sniff_forms_and_roundtrip,
     test_editor_node,
     test_compiler_node,
@@ -2482,8 +2792,16 @@ TESTS = [
     test_agent_md_append_injection,
     test_translator_is_changed_tracks_agent_md,
     test_agent_md_widget_selection,
+    test_agent_md_validate_inputs_bypasses_combo_layer,
     test_resolve_endpoint_and_body,
     test_http_first_try_success,
+    test_translator_reuses_cached_translation_when_enabled,
+    test_translator_cache_invalidates_on_draft_change,
+    test_translator_reuse_off_forces_fresh_and_refreshes_cache,
+    test_translator_is_changed_tracks_reuse_switch,
+    test_translator_reuse_widget_is_appended,
+    test_translator_compiled_non_1024_canvas,
+    test_translator_canvas_dimensions_affect_cache_and_is_changed,
     test_http_retry_success,
     test_http_fail_after_retries,
     test_http_truncation_detected,
@@ -2520,6 +2838,8 @@ TESTS = [
     test_pose_catalog_route_cache,
     test_probe_untrusted_private_target_blocked,
     test_host_is_private_fails_closed_on_dns_error,
+    test_host_is_private_blocks_non_global_ranges,
+    test_probe_http_error_body_read_is_capped,
     test_probe_error_classification,
     test_probe_minimax_200_business_error,
     test_probe_image_detail_and_vision_warning,
