@@ -383,6 +383,30 @@ function initNode(node) {
       bindModeCallbacks(node);
       syncEnabledFromLinks(node);
       warnApiKeyIfSet(node, showKeyWarn);
+      // 换图自动 enable（用户规格：更换上传图片时反推应自动开启）。
+      // 图片值来自连线的 LoadImage widget；首次记录基线不触发，之后值变化即开。
+      // 放在 syncEnabledFromLinks 之后：未接 reverse_in 时该函数会强制关（语义保留）。
+      const imgIn = (node.inputs || []).find((i) => i && i.name === "image");
+      let imgVal;
+      if (imgIn && imgIn.link != null) {
+        const link = app.graph && app.graph.links && (app.graph.links.get ? app.graph.links.get(imgIn.link) : app.graph.links[imgIn.link]);
+        const src = link && app.graph.getNodeById ? app.graph.getNodeById(link.origin_id) : null;
+        const wImg = src && src.widgets ? src.widgets.find((x) => x.name === "image") : null;
+        if (wImg) imgVal = String(wImg.value);
+      }
+      if (imgVal !== undefined) {
+        if (node._mpsLastImage === undefined) {
+          node._mpsLastImage = imgVal;
+        } else if (imgVal !== node._mpsLastImage) {
+          node._mpsLastImage = imgVal;
+          const wEn = findWidget(node, "enabled");
+          if (wEn && !wEn.value) {
+            wEn.value = true;
+            if (wEn.callback) wEn.callback(true);
+            setReverseStatus(node, "🖼 检测到更换图片：反推已自动开启", "ok");
+          }
+        }
+      }
       // configure 可能替换 widget 对象或改值；只在模式实际变化时重跑显隐/恢复
       const migrated = migrateWidgetLayout(node);
       const m = normalizeReverseMode(widgetValue(node, "reverse_mode"));
