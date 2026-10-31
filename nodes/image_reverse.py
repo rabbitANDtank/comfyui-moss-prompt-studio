@@ -189,7 +189,7 @@ class MOSSImageReverse:
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("prose_zh", "draft_zh", "canvas_zh")
     OUTPUT_TOOLTIPS = (
-        "输出①：中文散文（整段图像描述）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 写入 source，配合 ai_draft 开启走 LLM 拆解；本次执行后写回前端，需再 Queue 一次完整链路",
+        "输出①：中文散文（整段图像描述）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 写入 source 并自动开启 AI 拆解，Queue 即完成 拆解→翻译 全链（有缓存不重复计费）",
         "输出②：中文 layout 草稿 JSON（带 bbox）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 写入 source 并自动关 ai_draft，直接进翻译/编译；本次执行后写回前端，需再 Queue 一次完整链路",
         "输出③：同一份 layout JSON（画布形态）。通常接入 MOSS 提示词编辑器（Editor）节点的 reverse_in 输入 → 直接写回 edits，画布立即出现可编辑框（本节点执行完即写回，无需再 Queue）",
     )
