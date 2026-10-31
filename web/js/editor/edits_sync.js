@@ -312,12 +312,25 @@ export function mountEditsSync(ctx) {
 
     if (p.width) setWidgetInput(ctx.wCw, p.width);
     if (p.height) setWidgetInput(ctx.wCh, p.height);
-    // 反推结果是“已处理好的输入”，三种形态都关掉自动拆解；prose 由用户手动点 ⚡拆解
-    setAiDraft(false);
-    if (p.mode === "prose" || p.mode === "draft") {
+    // 反推结果的 ai_draft 联动（v1.9.0-beta0 按用户反馈调整）：
+    // - prose（散文）：自动开启 AI 拆解——连 prose_zh 到 reverse_in 的意图就是
+    //   “反推散文 → 拆解 → 翻译”全链；普通 Queue 有输入哈希缓存，不重复计费。
+    // - draft/canvas（layout JSON）：保持关闭——已是 layout，无需拆解。
+    // 旧行为三种形态都强制关，导致散文写回后普通 Queue 不拆解（易踩坑）。
+    if (p.mode === "prose") {
+      setAiDraft(true);
+      setWidgetInput(ctx.wSource, p.text);
+      rebuildFromWidgets({ preferEdits: false, write: true });
+      if (M.els && M.els.status) {
+        M.els.status.textContent = "📨 反推散文已写回 source，AI 拆解已自动开启：Queue 即完成 拆解→翻译 全链";
+        M.els.status.className = "mps-status ok";
+      }
+    } else if (p.mode === "draft") {
+      setAiDraft(false);
       setWidgetInput(ctx.wSource, p.text);
       rebuildFromWidgets({ preferEdits: false, write: true });
     } else if (p.mode === "canvas") {
+      setAiDraft(false);
       setWidgetInput(ctx.wEdits, p.text);
       // 解析失败时保留原画布与归属签名，别把旧画布盖成当前 source（P0-1 同类风险）
       if (!rebuildFromEdits(currentSourceSig())) return { ok: false, error: "parse" };
