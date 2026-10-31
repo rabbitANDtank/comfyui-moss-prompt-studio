@@ -1,8 +1,8 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-当前版本：**v1.9.0-beta0**
+当前版本：**v1.9.0**
 
-> **本次更新（v1.9.0-beta0）**：纯架构重构——后端/前端/测试三大文件按职责拆分为小模块，**行为零变化**，旧工作流无需任何调整（详见「版本与更新」）。v1.8.x 的姿势/服装参考暂无节点输入口（见上文已知限制），1.9.0 正式版恢复。
+> **本次更新（v1.9.0）**：反推三输出自动写回画布联动拆解，换图自动启用反推；修复姿势/服装输入口缺失与注入卡死；架构模块化重构（详见「版本与更新」）。
 
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接原生 MOSS-Image 节点生图。
 
@@ -32,7 +32,6 @@ LoadImage ──> ImageReverse（可选）──> Editor ──> Translator ─�
 4. **文字输入**：把中文散文或 layout 草稿贴进 **Editor** 的 `source`；散文点 **⚡拆解** 生成画布，layout 草稿会直接识别。
 5. **接生成节点**：Compiler 的 `prompt`/`clip_text` 接正向 CLIPTextEncode，`negative` 接负向，`width`/`height` 接空 Latent；**不要再送 MOSS-Image Layout Prompt**。
 6. **可选入口**：图片反推接 `LoadImage → ImageReverse → Editor.reverse_in`；姿势接 `Pose Gallery.description → Editor.pose_in(_2)`；服装接 `Costume Gallery.description → Editor.costume_in(_2)`。都不影响主链。
-7. **⚠ v1.8.x 已知限制**：`pose_in`/`costume_in` 的原生 widget 已整合进节点内「姿势参考/服装参考」双列面板，节点左侧**暂无对应输入口**，上面第 6 条的姿势/服装连线接法暂不可用。请在面板输入框**手填或粘贴** `description` 文本（🎯姿势①② 可点选），功能等价；输入口将在 1.9.0 恢复（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)）。
 
 推荐工作流：[`examples/MOSS-Image-生图.json`](examples/MOSS-Image-生图.json)（Editor → Translator → Compiler → 采样的完整文生图流；示例基于 v1.7.1；旧版 Editor 节点请按顶部提示删除重建并重新连线）。
 
@@ -175,6 +174,8 @@ node --test tests/*.test.mjs  # 130 用例（glob 自动包含所有前端测试
 覆盖编译/识别/翻译/反推/连接测试/姿势注入/服装注入，以及前端纯逻辑、生命周期、写回和模式预设。控制台会打印 `[MOSS Studio] LLM ...` 日志，可用于排查耗时、重试和截断。真实 LLM 的姿势注入对照实验：`python tests/bench_ai_draft.py --variants pose_solo,pose_dual,pose_pair`（需 config.json）。
 
 ## 版本与更新
+
+- **v1.9.0**：反推三输出（散文/草稿/画布）接入 `reverse_in` 后自动写回画布并联动拆解，**更换上传图片自动启用反推**；**恢复 `pose_in`/`costume_in` 的左侧输入口**（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)），可直接连线 Costume/Pose Gallery；修复注入结果卡死（队列空自愈 + 超时兜底随 LLM timeout 放宽）与翻译顶层 meta 容错；后端/前端/测试按职责模块化重构，行为兼容 v1.8.x。服装注入不再误删画面文字条目；layout 画布尺寸遵循工具栏比例/像素设定。Python **106** / Node **130**。
 
 - **v1.9.0-beta0**：纯架构重构版，**用户可见行为零变化**（节点名/输入输出/工作流兼容性不变）。`py/translate.py`（1402 行）拆为 llm_client/agent_md/caption_segments/inject_pose/inject_costume/draft_repair 六个职责模块，原文件保留为门面 re-export；`web/js/editor_canvas.js`（2705 行）拆为 11 个 `editor/` 模块（styles/dom_shell/canvas_render/items/inspector/edits_sync/template_panel/pose_panel/inject_flows/run_status/translator_panel），主文件仅剩组装骨架（441 行）；`tests/run_tests.py`（3237 行）拆为 `tests/py/` 11 个用例文件 + 自动收集 runner（新增测试不再需要注册列表）。拆分经逐字节一致校验与行为冒烟轨迹对比验证；Python **102** / Node **128** 与拆分前完全一致。测试 runner 勿并发运行（见文件头注释）。
 - **v1.8.0**：新增可选服装注入（comfyui-costume-gallery `description → costume_in(_2)`、`costume_mode`、📥服装、🔄 对调两人服装）；caption 改为通用分段解析，姿势/服装/遮挡后缀可共存且互不删除；修复连续快速注入的结果误判（submit token）与反推草稿旧服装 object 残留；新增敏感分类/旧服装混合提示；⚡拆解 改为主色大按钮；Editor/Translator 画布宽高控件类型归一（旧工作流错位导致的「运行成功但不出图」）。Python **102** / Node **128**。
