@@ -51,6 +51,11 @@ def test_http_fail_after_retries():
 def test_http_truncation_detected():
     class TruncHandler(MockHandler):
         def do_POST(self):
+            # 必须读掉请求体：不读体就直接响应，Windows loopback 上会偶发
+            # WinError 10053（客户端发送与服务器响应/关闭竞争）→ 用例 flaky。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
             body = json.dumps({"choices": [{"message": {"content": "半截输出……"}, "finish_reason": "length"}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
