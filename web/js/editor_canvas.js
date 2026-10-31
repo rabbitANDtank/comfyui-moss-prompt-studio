@@ -62,9 +62,23 @@ function init(node) {
     if (ss) wSrcSig = ss;
     normalizeReplaceEdits();
     normalizePoseWidgets();
+    exposeReferenceSockets();
     bindEditsWidget();
     return !!(wSource && wEdits && wCw && wCh);
   };
+  // issue #1：参考输入的原生 widget 被隐藏（换成节点内双列面板）后，ComfyUI 不会把
+  // 对应 input 槽渲染成左侧 socket，用户无法把 Costume/Pose Gallery.description 连进来。
+  // 解除槽与 hidden widget 的绑定即可恢复渲染；widgets 数组不动——无连线时前端
+  // graphToPrompt 仍按 widget 值提交，有连线时连线值优先，取值语义不变。
+  // 序列化/configure 会重建绑定，故挂在每次 rebindWidgets（幂等）里。
+  function exposeReferenceSockets() {
+    for (const nm of ["pose_in", "pose_in_2", "costume_in", "costume_in_2"]) {
+      const inp = (node.inputs || []).find((i) => i && i.name === nm);
+      if (!inp || !inp.widget) continue;
+      inp.widget = null;
+      if ("_widgetRef" in inp) inp._widgetRef = null;
+    }
+  }
   // 旧工作流缓存的姿势/服装 widget 可能是 ""/null（widgets_values 错位或新控件缺省）：
   // 服务端会直接拒绝 pose_mode=""、apply_pose="" 等，这里在 configure/轮询时静默修回默认值。
   function normalizePoseWidgets() {
