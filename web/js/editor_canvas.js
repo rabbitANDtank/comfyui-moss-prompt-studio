@@ -22,6 +22,7 @@ import { mountInspector } from "./editor/inspector.js";
 import { mountEditsSync } from "./editor/edits_sync.js";
 import { mountTemplatePanel } from "./editor/template_panel.js";
 import { mountPosePanel } from "./editor/pose_panel.js";
+import { mountRevisionPanel } from "./editor/revision_panel.js";
 import { mountInjectFlows } from "./editor/inject_flows.js";
 import { mountRunStatus } from "./editor/run_status.js";
 import { initTranslator, sanitizeAgentMd } from "./editor/translator_panel.js";
@@ -110,6 +111,10 @@ function init(node) {
     const wCost = W("costume_in"), wCost2 = W("costume_in_2");
     if (wCMode) fix(wCMode, normalizeCostumeMode(wCMode.value));
     if (wCApply) fix(wCApply, normalizeApplyCostume(wCApply.value));
+    // apply_edit 同族（终审 GAP：服务端 validate_inputs 在 run() 前对 INT 做 int()，
+    // 旧工作流错位解出 "" 会 400 整次提交——归一必须在加载/轮询的前端侧完成）
+    const wEApply = W("apply_edit");
+    if (wEApply) fix(wEApply, normalizeApplyPose(wEApply.value));
     if (wCost) fix(wCost, normalizeCostumeText(wCost.value));
     if (wCost2) fix(wCost2, normalizeCostumeText(wCost2.value));
     // 画布宽高同理：≤v1.7.2 工作流错位可能把 INT 读成字符串，服务端会拒整次提交
@@ -173,6 +178,7 @@ function init(node) {
     // source 归属（P0-1）：stateSrcSig=当前画布对应的 source 签名；split/pose/costume/queueSrcSig=
     // 已提交但尚未回来的异步结果对应的 source 签名；lastDraft*=双通道去重。
     stateSrcSig: "", splitSrcSig: "", poseSrcSig: "", costumeSrcSig: "", queueSrcSig: "",
+    editSrcSig: "", editBtn: null, lastOpsText: "", lastOpsAt: 0, lastOpsPid: "",
     lastDraftText: "", lastDraftAt: 0, lastDraftPid: "",
     // F3/F4：提交互斥 / 最近一次拆解-注入的 prompt_id / 资源句柄。
     // submitSeq/submitPrevId：本地注入结果可能先于 /prompt 响应到达（见 submit_gate）。
@@ -402,6 +408,7 @@ function init(node) {
       M.posePendingAt = 0;
       M.costumePendingAt = 0;
       M.splitPendingAt = 0;
+      try { closeRevisionPanel(); } catch (e) { /* noop */ }
       M.submitPrevId = "";
       M.queueSrcSig = "";
       rebuildFromWidgets({ preferEdits: true, write: false });
@@ -435,6 +442,10 @@ function init(node) {
   const { openPosePicker, closePosePicker } = mountPosePanel(ctx);
   Object.assign(fx, { closePosePicker });
 
+  // ---------- AI 定向改稿审批卡（P1a-2，revision_panel.js） ----------
+  const { openRevisionPanel, closeRevisionPanel } = mountRevisionPanel(ctx);
+  Object.assign(fx, { openRevisionPanel, closeRevisionPanel });
+
   // ---------- 运行状态：结果处理 + 事件 + 轮询 + 700ms 重建定时器（已拆到 ./editor/run_status.js，行为不变） ----------
   // onApi* 仍以 init 作用域常量解构：onRemoved 生命周期回调据此解绑事件监听
   const { rememberRun, onApiError, onApiStatus, onApiInterrupted, onApiExecuted } = mountRunStatus(ctx);
@@ -442,7 +453,7 @@ function init(node) {
   Object.assign(fx, { rememberRun });
 
   // ---------- 提交流程（已拆到 ./editor/inject_flows.js，行为不变） ----------
-  const { applyPose, applyCostume, runAiSplit } = mountInjectFlows(ctx);
+  const { applyPose, applyCostume, runAiSplit, applyEdit } = mountInjectFlows(ctx);
   // LLM 配置同步反馈走状态条
   const cfgNotify = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status ok"; };
 
@@ -450,7 +461,7 @@ function init(node) {
   // 放在所有定义之后、首次同步重建之前；模块侧对这些名字只有事件/异步调用。
   Object.assign(fx, {
     snapshot, syncWidgets, writeEdits, writeEditsSoon, showMsg, hideMsg,
-    startGesture, cfgNotify, runAiSplit, applyPose, applyCostume,
+    startGesture, cfgNotify, runAiSplit, applyPose, applyCostume, applyEdit,
     openPosePicker, openTemplatePanel, rebuildFromWidgets,
   });
 

@@ -395,5 +395,95 @@ export function mountInjectFlows(ctx) {
     }
   }
 
-  return { applyPose, applyCostume, runAiSplit, linkSourceValue, referenceLinkOverrideWarning };
+  // ⤢改稿（AI 定向改稿）：把当前画布 + edit_request（+选中 scope）提交给后端 LLM
+  // 产 ops，结果走 ui.mps_ops 独立通道 → 审批卡（run_status 路由，不动画布）。
+  // 双 sig 锚定（评审 BLOCKING-1 修正）：sourceSignature 算法两端一致；在飞期间
+  // source 或 edits 任一变化 → 提案作废（防旧画布提案碾掉手改）。
+  async function applyEdit(btn) {
+    const api = (typeof app !== "undefined" && app.api) || (window.app && window.app.api);
+    if (!api || !api.clientId) { alert("前端尚未就绪，稍后再试"); return; }
+    const fail = (t) => { M.els.status.textContent = t; M.els.status.className = "mps-status err"; };
+    if (M.submitting) { fail("已有拆解/注入/改稿任务在飞，请等待完成"); return; }
+    if (!M.S || M.S.kind !== "layout") {
+      fail("AI 改稿需要拆解完成的画布：先 ⚡拆解（或贴入 layout 草稿）再改稿");
+      return;
+    }
+    const wReq = node.widgets.find((x) => x.name === "edit_request");
+    const req = String((wReq && wReq.value) || "").trim();
+    if (!req) {
+      fail("请先在「AI 改稿」输入框填写修改要求（如：把标题改成『秋日』；右侧加一只猫）");
+      wReq && wReq.inputEl && wReq.inputEl.focus();
+      return;
+    }
+    M.submitting = true;
+    btn.disabled = true;
+    btn.textContent = "⏳改稿中…";
+    M.editBtn = btn;
+    M.splitAt = Date.now();       // 复用空队列监视器与超时兜底
+    M.posePendingAt = 0; M.costumePendingAt = 0; M.splitPendingAt = 0;
+    M.editSrcSig = fx.currentSourceSig();
+    // R7（复查）：新提交作废旧提案——关掉还开着的审批卡，防旧卡在飞期间被采纳
+    fx.closeRevisionPanel();
+    M.splitSrcSig = ""; M.poseSrcSig = ""; M.costumeSrcSig = "";
+    // scope：v1 单选或全稿（全库无多选；选中任一条目 → 只允许该条目）
+    const items = (M.S.d && M.S.d.items) || [];
+    let scope = null;
+    if (M.sel != null && items[M.sel]) {
+      scope = { indexes: [M.sel], summary: false };
+    }
+    M.els.status.textContent = "⏳ AI 改稿中…（LLM 产出操作列表，通常 10~120 秒；完成后弹出审批卡，未提及的元素不会被改动）"
+      + (scope ? `；已限定只改选中条目 #${String(M.sel)}` : "");
+    M.els.status.className = "mps-status";
+    try {
+      if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      if (M.editsDirty && !fx.adoptEdits(false)) {
+        M.els.status.textContent = "edits 解析失败，未改稿——修正或清空 edits 后重试";
+        M.els.status.className = "mps-status err";
+        return;
+      }
+      fx.writeEdits();
+      const full = await app.graphToPrompt();
+      const all = (full && (full.output || full)) || {};
+      const wAi = node.widgets.find((x) => x.name === "ai_draft");
+      const inputs = buildSplitPayload(all, node.id, {
+        edits: ctx.wEdits.value,
+        ai_draft: !!(wAi && wAi.value),
+        force_split: false,
+        apply_edit: -2,
+        edit_request: req,
+        edit_scope: scope ? JSON.stringify(scope) : "",
+        // 显式关闭两条注入通道（runAiSplit 同款：防旧工作流残留值误走注入分支）
+        apply_pose: -1,
+        apply_costume: -1,
+      });
+      if (!inputs) throw new Error("编辑器被旁路或未注册（检查 Ctrl+B / 节点状态）");
+      const submitToken = ++M.submitSeq;
+      M.submitPrevId = M.lastSubmitId || M.lastDraftPid || "";
+      M.lastSubmitId = "";
+      const r = await api.fetchApi("/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: inputs, client_id: api.clientId }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error((j.error && j.error.message) || ("HTTP " + r.status));
+      }
+      const j = await r.json().catch(() => ({}));
+      if (M.submitSeq === submitToken && M.submitting) {
+        M.lastSubmitId = (j && j.prompt_id) || "";
+      }
+      const submitted = (inputs[String(node.id)] && inputs[String(node.id)].inputs) || {};
+      console.info("[MPS] submit", {
+        kind: "edit", prompt_id: M.lastSubmitId, srcSig: M.editSrcSig,
+        scope: submitted.edit_scope || null,
+        request: (submitted.edit_request || "").slice(0, 120),
+      });
+    } catch (e) {
+      fx.resetSplitBtn();
+      fail("AI 改稿提交失败: " + e.message);
+    }
+  }
+
+  return { applyPose, applyCostume, runAiSplit, applyEdit, linkSourceValue, referenceLinkOverrideWarning };
 }

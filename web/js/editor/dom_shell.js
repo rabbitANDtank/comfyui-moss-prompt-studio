@@ -108,6 +108,9 @@ export function buildDomShell(ctx) {
   const btnPose = mkBtn("📥姿势", () => fx.applyPose(btnPose), "把姿势参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、双人姿势给两人、单姿势给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销", tbLine2);
   // 📥服装：把 costume_in/costume_in_2 的服装短语本地注入角色 caption（不调 LLM）
   const btnCostume = mkBtn("📥服装", () => fx.applyCostume(btnCostume), "把服装参考短语注入当前画布的角色 caption（本地写入不调 LLM）：选中角色→只注入它；未选中→双参考按左右分配、单参考给最突出角色。注入后自动过官方 JSON 校验并刷新画布，可 ↶撤销", tbLine2);
+  // ⤢改稿：AI 定向改稿——当前画布 + edit_request 提交 LLM 产操作列表，
+  // 审批卡逐条采纳；未被 op 引用的元素逐字节不动（P1a）
+  const btnEdit = mkBtn("⤢改稿", () => fx.applyEdit(btnEdit), "AI 定向改稿：在「AI 改稿」输入框写一句修改要求后点本按钮。LLM 只产出操作列表（改描述/改文字/移动/增删条目），经审批卡逐条采纳才写入画布；未提及的元素不会被改动，可 ↶撤销。选中某条目时只允许改该条目", tbLine2);
   // 🎯姿势①/②：从图库点选姿势（体系/分类/视角筛选 + 关键词搜索），写入 pose_in widget
   mkBtn("🎯姿势①", () => fx.openPosePicker(1), "打开姿势库点选面板（需已安装 comfyui-pose-gallery）：按体系/分类/视角筛选或搜索，点视角按钮选用，写入 pose_in。也可在 widget 里手填或连线", tbLine2);
   mkBtn("🎯姿势②", () => fx.openPosePicker(2), "同 🎯姿势①，写入 pose_in_2（双人分别指定姿势时给另一角色）", tbLine2);

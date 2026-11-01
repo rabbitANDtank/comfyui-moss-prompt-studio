@@ -374,6 +374,9 @@ Schema and rules:
 - bbox: integer absolute pixels, top-left origin, 0 <= x_min < x_max <= width, 0 <= y_min < y_max <= height. Boxes describe placement, overlaps between elements are allowed.
 - For every overlapping pair, append occlusion wording: to the FRONT item's caption append "，处于最前层，部分遮挡相邻元素", to the BACK item's caption append "，被前方元素部分遮挡".
 - A "text" item must additionally carry "text": the exact visible characters in their original language. Do not create text items when the prose says there is no visible text.
+- One text item per contiguous passage: split into separate text items only when their placement must be independent; different fonts or sizes alone are NOT a reason to split.
+- Knowledge graphics and diagrams: write real explanatory content in captions; never leave empty placeholder modules.
+- Posters: preserve the intended information hierarchy; do not force an infographic layout unless the prose asks for one.
 - Use no fields beyond the schema above."""
 
 

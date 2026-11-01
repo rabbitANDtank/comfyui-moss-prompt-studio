@@ -1,8 +1,10 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-当前版本：**v1.9.2**
+当前版本：**v1.10.0-beta**
 
-> **本次更新（v1.9.2）**：修复画布手调在防抖窗口内 Queue 被静默回滚的问题（翻译节点因此拿不到最新 JSON 的根因）；新增工具栏 **⤓提交** 按钮——一键把当前画布冲进 edits 并体检（元素盘点/全局描述字数/尺寸/官方校验/文字容量与 token/归属签名）。v1.9.1 内容见「版本与更新」。
+> **本次更新（v1.10.0-beta）**：AI定向改稿：一句话改画布，逐条审批可撤销——Editor 工具栏新增 **⤢改稿**：LLM 只产出操作清单（改描述/改文字/移动/增删条目），审批卡词级 diff 逐条勾选采纳、🔒锁定画面文字、文字容量与 token 提示，未被提及的元素逐字节不动，可 ↶撤销；选中条目自动限定改稿范围；等待期间手改画布则提案作废；反推后可直接一句话迭代。headless/API：`edit_request`+`apply_edit=-2` 自动应用。另：官方编译器逐字节差分对拍（vendor+300 例 fuzz）、拆解提示词补官方写作规则、旧工作流 apply_edit 错位归一（前后端双兜底）、示例工作流清除失效 base_url/model。v1.9.2 内容见「版本与更新」。
+
+> **v1.9.2**：修复画布手调在防抖窗口内 Queue 被静默回滚的问题（翻译节点因此拿不到最新 JSON 的根因）；新增工具栏 **⤓提交** 按钮——一键把当前画布冲进 edits 并体检（元素盘点/全局描述字数/尺寸/官方校验/文字容量与 token/归属签名）。v1.9.1 内容见「版本与更新」。
 >
 > **v1.9.1**：审计修复批次——粘贴坏 JSON 不再清空画布与撤销栈、LLM 截断改报错不再静默出半截稿、layout 出图尺寸回归草稿优先（v1.8.x 一致）、换图自动启用反推仅在已接 reverse_in 时生效；另修 MiniMax 重试口径 / base_url 端口归一 / snap16 舍入等（详见「版本与更新」）。
 
@@ -23,6 +25,7 @@ LoadImage ──> ImageReverse（可选）──> Editor ──> Translator ─�
 - **Translator：中→英**——OpenAI 兼容 LLM；`reuse_translation` 可复用上次成功译文，反复出图不重复计费；粘贴已编译 JSON 时用 `canvas_width`/`canvas_height` 反解真实画布坐标。
 - **Compiler：官方口径**——按 OpenMOSS/MOSS-Image 官方 skill 编译与严格校验；caption 输出纯文本，layout/已编译输出单行 JSON。
 - **ImageReverse（可选）**——图片 → 中文散文 / 中文草稿 / 画布 JSON；四档模式，默认关闭。
+- **AI 定向改稿（可选）**——在「AI 改稿」框写一句修改要求（如「把标题改成『秋日』」「右侧加一只猫」），点 **⤢改稿**：LLM 只产出操作列表（改描述/改文字/移动缩放/增删条目），**审批卡逐条勾选采纳**（词级 diff 预览、🔒锁定画面文字、文字容量与 token 提示）才写入画布；**未被提及的元素逐字节不动**，可 ↶撤销。选中某条目时自动限定只改该条目；等待期间手改画布则提案自动作废。
 - **姿势参考（可选）**——接 comfyui-pose-gallery 的 `description`，或手填/🎯 点选；支持 ⚡拆解展开与 📥本地短语注入。
 - **服装参考（可选）**——接 comfyui-costume-gallery 的 `description`，或手填；支持 ⚡拆解展开与 📥服装本地短语注入；与姿势段共存。
 
@@ -173,14 +176,15 @@ custom_nodes/comfyui-moss-prompt-studio/
 ## 测试
 
 ```bash
-python tests/run_tests.py     # 106 用例
-node --test tests/*.test.mjs  # 131 用例（glob 自动包含所有前端测试）
+python tests/run_tests.py     # 145 用例
+node --test tests/*.test.mjs  # 140 用例（glob 自动包含所有前端测试）
 ```
 
 覆盖编译/识别/翻译/反推/连接测试/姿势注入/服装注入，以及前端纯逻辑、生命周期、写回和模式预设。控制台会打印 `[MOSS Studio] LLM ...` 日志，可用于排查耗时、重试和截断。真实 LLM 的姿势注入对照实验：`python tests/bench_ai_draft.py --variants pose_solo,pose_dual,pose_pair`（需 config.json）。
 
 ## 版本与更新
 
+- **v1.10.0-beta** **AI 定向改稿**（P1a 全量）：Editor 新增 ⤢改稿 + 审批卡（词级 diff/🔒锁定画面文字/lint/采纳带回滚/撤销）；LLM 只产 ops（7 种操作 + target 指纹核验 + scope），未被 op 引用的条目逐字节不动；`ui.mps_ops` 独立通道防版本偏斜；双 sig 锚定防在飞手改碾压；headless 自动应用（`edit_request`+`apply_edit=-2`）；agents/revision-example.md 示例指令；反推 canvas 写回后引导直接改稿。**契约加固**：官方编译器 vendor 差分（`tests/vendor/compile_prompt_official.py` + 300 例固定种子 fuzz 逐字节一致）+ 编译 item 键序对齐官方；拆解提示词补 3 条官方写作规则（一段文字一个 item/知识图实内容/海报层级）；text_fit 补官方处置口径。**修复**：旧工作流 apply_edit 错位 400（前端归一+后端兜底）、锁文字被全部采纳绕过（B1）、mps_ops 双投递重复开卡（B2）。示例工作流清除失效 base_url/model（401 陷阱）。测试 Python **145** / Node **140**；六轮验证（单测→双 ponytail 审查→真机交互→嵌入缝隙→全链路出图+视觉确认→终审 GAP 闭环）。
 - **v1.9.1** **数据安全**：粘贴非法 source 不再清空画布与撤销栈（保留原画布并提示冲突）；Queue 前手改 edits 解析失败直接否决提交并提示，不再等后端报错中止整条队列；LLM 输出中途截断（content_filter/网关截断，`finish_reason` 异常）改为报错重试，绝不静默补全成半截稿。**行为回归**：layout 出图尺寸恢复跟草稿走（与 v1.8.x 一致；改尺寸用工具栏比例/像素选择器，前端确认后等比缩放所有框）。**交互**：换图自动启用反推仅在已接 `reverse_in` 时生效并同步勾选框 UI（未接线不再弹假提示）；注入/服装/提交在飞时改 source 不再重置画布、丢弃结果。**健壮性**：MiniMax 限流类业务码可重试（仅鉴权/参数/模型不存在判永久）；base_url 显式 `:443`/`:80` 与省略写法归一（config key 安全回退不再误拒）；`snap16` .5 边界恒定向上取近；tags/palette 数组只收非空字符串（垃圾元素不再混进编译 prompt）；底图保存失败输出日志不再静默。**链路审计补漏**：直接在 widget 数字框改画布尺寸不再把已拆解布局静默打回散文（守卫提示改用工具栏选择器或 ⚡拆解）；换 source 后 700ms 内的手改 edits 不再被错误归属到新 source（拒绝接管并提示，防旧画布冒充新稿）；手改 JSON 删掉 `summary` 不再崩掉检查器；`finish_reason` 的 `end_turn`/`eos`/`stop_sequence` 合法变体放行（custom provider 常见）；外部 API 传 bool 的 `apply_pose/costume` 回落为不注入。**可维护性**：官方字段集归一 `compile_prompt` 单一来源；新增前后端常量对拍测试与 FNV 黄金值（marker/反推预设/词表任一侧漂移即红）；两处 ComfyUI 前端内部结构 hack 加降级提示（issue #1 复发路径可感知）。
 - **v1.9.0**：反推三输出（散文/草稿/画布）接入 `reverse_in` 后自动写回（prose/draft 写入 source、canvas 写入 edits，写回后需手动 ⚡拆解），**更换上传图片自动启用反推**（仅在已接 reverse_in 时生效并同步勾选框）；**恢复 `pose_in`/`costume_in` 的左侧输入口**（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)），可直接连线 Costume/Pose Gallery；修复注入结果卡死（队列空自愈 + 超时兜底随 LLM timeout 放宽）与翻译顶层 meta 容错；后端/前端/测试按职责模块化重构，行为兼容 v1.8.x。服装注入不再误删画面文字条目；layout 出图尺寸跟草稿走（与 v1.8.x 一致），改尺寸用工具栏比例/像素选择器（前端确认后等比缩放所有框并写回画布）。Python **106** / Node **130**。
 
@@ -191,7 +195,7 @@ node --test tests/*.test.mjs  # 131 用例（glob 自动包含所有前端测试
 
 ## 设计依据与致谢
 
-- 编译器与校验规则移植自 [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 官方 skill（`skills/moss-image-prompt-enhancer`），保证与官方口径一致。
+- 编译器与校验规则移植自 [OpenMOSS/MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) 官方 skill（`skills/moss-image-prompt-enhancer`），保证与官方口径一致；`tests/vendor/compile_prompt_official.py` 为原样引入的官方编译脚本（Apache-2.0，仅测试差分对拍用，不参与运行时），`tests/py/test_golden_official.py` 用它对每个边界语料与 300 例固定种子 fuzz 做逐字节差分。
 - 画布交互改编自 [swan7-py/json-prompt-visualizer](https://github.com/swan7-py/json-prompt-visualizer) 的 canvas.py（拖拽/缩放/撤销/重叠闸门/坐标换算思路），适配为 ComfyUI 前端扩展。
 - 指令文件的追加注入语义参考了 [Codex-X](https://github.com/yynxxxxx/Codex-X) 的 Append 托管块设计。
 - 姿势图库集成与中文姿势数据来自 [wangweihong/comfyui-pose-gallery](https://github.com/wangweihong/comfyui-pose-gallery)；感谢开发者 wangweihong，以及原始姿势画作者 ギア（@giaaibusi）与中文数据整理 Anhao。

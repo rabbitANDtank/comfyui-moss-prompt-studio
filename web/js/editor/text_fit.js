@@ -110,7 +110,7 @@ export function lintTextItems(draft) {
     }
     out.push({
       index,
-      message: `items[${index}] 文字容量不足：${parts.join("；") || "超出文字框"}`,
+      message: `items[${index}] 文字容量不足：${parts.join("；") || "超出文字框"}；建议放大框或重排（官方口径：不删文案、不拉伸字形）`,
     });
   });
   return out;
