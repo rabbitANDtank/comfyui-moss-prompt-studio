@@ -369,7 +369,7 @@ export function mountEditsSync(ctx) {
     // 记录只存 owner/sig/mode + draftHash（不重复保存整份画布文本，控制工作流体积）
     if (ctx.wSig) setWidgetInput(ctx.wSig, reverseRecord(node.id, p.sig, p.mode, ctx.wEdits ? ctx.wEdits.value : ""));
     fx.updateStatus();
-    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}），再 Queue 一次完整链路生效`, "ok");
+    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}）${p.mode === "canvas" ? "，可直接 ⤢改稿 迭代（如：把主标题改成…）" : "，再 Queue 一次完整链路生效"}`, "ok");
     return { ok: true };
   };
 
@@ -377,8 +377,8 @@ export function mountEditsSync(ctx) {
   // 代码路径（flushEdits），不是新的执行通道。自动链路修好后它并非必需步骤，价值在
   // 显式可见：点一下就知道下次 Queue 会提交什么（元素数/尺寸/归属签名）。
   function commitNow() {
-    if (M.submitting || M.splitBtn || M.poseBtn || M.costumeBtn) {
-      M.els.status.textContent = "拆解/注入任务在飞，等完成后再提交";
+    if (M.submitting || M.splitBtn || M.poseBtn || M.costumeBtn || M.editBtn) {
+      M.els.status.textContent = "拆解/注入/改稿任务在飞，等完成后再提交";
       M.els.status.className = "mps-status err";
       return false;
     }

@@ -19,6 +19,7 @@ import { POSE_MARKER, COSTUME_MARKER } from "./pose.js";
 import { queueRemaining, shouldResetOnQueueIdle, shouldResetOnTimeout, fallbackTimeoutMs, queueHasNode,
   isDuplicateDraft, resultAttributionDecision } from "./submit_gate.js";
 import { commitDraftWriteback } from "./result_writeback.js";
+import { sourceSignature } from "./model.js";
 import { warnApiKeyIfSet } from "./llm_config.js";
 
 export function mountRunStatus(ctx) {
@@ -31,6 +32,50 @@ export function mountRunStatus(ctx) {
   let lastImgName = null;
   function processExecData(data, meta = {}) {
     if (!data) return;
+    // ⤢改稿结果（P1a-2）：ui.mps_ops 独立通道——不写画布，路由进审批卡。
+    // 归属判定与 mps_draft 同款（prompt_id/双 sig）；在飞期间 source 或 edits
+    // 被手改 → 提案作废（防旧画布提案碾掉手改，评审 BLOCKING-1/R5）。
+    if (data.mps_ops !== undefined) {
+      const mo = Array.isArray(data.mps_ops) ? data.mps_ops.join("") : data.mps_ops;
+      if (typeof mo === "string" && mo.trim()) {
+        // 双通道去重（复查 B2）：heal 先投递会清 lastSubmitId，迟到的 executed 再来时
+        // pidMismatch 拦不住——与 mps_draft 同款 2s 窗口同文本同 pid 判重，防重复开卡。
+        if (isDuplicateDraft({ lastText: M.lastOpsText, lastAt: M.lastOpsAt, lastPid: M.lastOpsPid,
+          text: mo, now: Date.now(), promptId: meta.promptId ? String(meta.promptId) : "" })) return;
+        M.lastOpsText = mo; M.lastOpsAt = Date.now();
+        M.lastOpsPid = meta.promptId ? String(meta.promptId) : "";
+        try {
+          const p = JSON.parse(mo);
+          const promptId = meta.promptId ? String(meta.promptId) : "";
+          const pidMismatch = !!promptId && !!M.lastSubmitId && promptId !== String(M.lastSubmitId);
+          const srcChanged = p.src_sig && p.src_sig !== fx.currentSourceSig();
+          const editsChanged = p.edits_sig && p.edits_sig !== sourceSignature(String(ctx.wEdits.value || ""));
+          if (pidMismatch) {
+            console.debug("[MPS] mps_ops prompt_id mismatch", { promptId, lastSubmitId: M.lastSubmitId });
+          } else if (srcChanged || editsChanged) {
+            fx.resetSplitBtn();
+            M.els.status.textContent = "⚠ 改稿提案基于旧画布（等待期间画布/source 已被修改），已作废——请重新 ⤢改稿";
+            M.els.status.className = "mps-status err";
+            rememberRun("⚠ 改稿提案已作废：等待期间画布被修改，请重新提交", "err");
+          } else if (M.S && M.S.kind === "layout") {
+            fx.resetSplitBtn();
+            fx.openRevisionPanel({
+              ops: p.ops || [], rejected: p.rejected || [], dropped: p.dropped || 0,
+              request: p.request || "", scope: p.scope || null,
+              base_draft: M.S.d,
+            });
+            rememberRun(`✅ AI 改稿提案已生成：${String((p.ops || []).length)} 条操作待审批（未被提及的元素不会改动）`, "ok");
+          } else {
+            fx.resetSplitBtn();
+            rememberRun("⚠ 改稿结果到达时画布已不是布局形态，提案丢弃", "err");
+          }
+        } catch (e) {
+          fx.resetSplitBtn();
+          M.els.status.textContent = "改稿结果解析失败：" + (e && e.message);
+          M.els.status.className = "mps-status err";
+        }
+      }
+    }
     if (data.mps_draft !== undefined) {
       // ComfyUI 4.9 的 ws 会把长字符串拆成单字符数组传输，归一成字符串
       const md = Array.isArray(data.mps_draft) ? data.mps_draft.join("") : data.mps_draft;
@@ -53,7 +98,8 @@ export function mountRunStatus(ctx) {
         const curSig = fx.currentSourceSig();
         const pendingSig = M.poseBtn ? M.poseSrcSig
           : (M.costumeBtn ? M.costumeSrcSig
-            : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig));
+            : (M.editBtn ? M.editSrcSig
+              : (M.splitBtn ? M.splitSrcSig : M.queueSrcSig)));
         const uiSrcSig = Array.isArray(data.mps_src_sig) ? data.mps_src_sig.join("") : data.mps_src_sig;
         const decision = resultAttributionDecision({
           promptId: meta.promptId,
@@ -146,6 +192,7 @@ export function mountRunStatus(ctx) {
   M.posePendingAt = 0;    // 📥姿势提交时间戳：区分 mps_draft 是拆解还是注入产物
   M.costumePendingAt = 0; // 📥服装提交时间戳
   M.splitPendingAt = 0;
+  M.lastOpsText = ""; M.lastOpsAt = 0; M.lastOpsPid = "";  // mps_ops 双通道去重
   function rememberRun(t, cls) { M.lastRunMsg = t; setRun(t, cls); }
 
   function reportDraftArrived(draft) {
@@ -219,7 +266,7 @@ export function mountRunStatus(ctx) {
       const hist = await res.json();
       const entry = hist && hist[pid];
       const ui = entry && entry.outputs && entry.outputs[String(node.id)];
-      if (ui && ui.mps_draft !== undefined) {
+      if (ui && (ui.mps_draft !== undefined || ui.mps_ops !== undefined)) {
         processExecData(ui, { promptId: pid });
         return true;
       }
@@ -232,9 +279,9 @@ export function mountRunStatus(ctx) {
     try {
       // submitting 卡 true 而按钮引用不匹配时也必须处理（v1.9.0-beta0 实测卡死路径：
       // 事件丢失后响应写入 lastSubmitId，仅看按钮引用会永久跳过复位）。
-      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.submitting) return;
+      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.editBtn && !M.submitting) return;
       const st = ev && ev.detail;
-      const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
+      const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.editBtn || M.submitting);
       const elapsedMs = Date.now() - (M.splitAt || 0);
       // 显式解析两种 status 负载；queue_remaining=0 必须命中（F2）
       if (shouldResetOnQueueIdle({ queueRemaining: queueRemaining(st), hasPending, elapsedMs })) {
@@ -254,10 +301,10 @@ export function mountRunStatus(ctx) {
   // 执行被用户/系统中断：复位按钮与 M.submitting，避免永久否决 Queue（F2）
   const onApiInterrupted = () => {
     try {
-      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.submitting) return;
+      if (!M.splitBtn && !M.poseBtn && !M.costumeBtn && !M.editBtn && !M.submitting) return;
       fx.resetSplitBtn();
       M.builtSig = M.pendSig = fx.currentSig();
-      M.els.status.textContent = "执行被中断：已复位拆解/注入按钮，可重新提交";
+      M.els.status.textContent = "执行被中断：已复位拆解/注入/改稿按钮，可重新提交";
       M.els.status.className = "mps-status err";
       M.posePendingAt = 0;
       M.costumePendingAt = 0;
@@ -291,11 +338,11 @@ export function mountRunStatus(ctx) {
       // 本节点执行完却没带回新草稿（例如 edits 透传 / 输入没变被缓存）：
       // 解除"⏳拆解中/⏳注入中"，别让按钮挂着等一个不会来的结果。
       const ui = out || {};
-      if ((M.splitBtn || M.poseBtn || M.costumeBtn) && ui.mps_draft === undefined && !(out && out.images && out.images.length)) {
+      if ((M.splitBtn || M.poseBtn || M.costumeBtn || M.editBtn) && ui.mps_draft === undefined && ui.mps_ops === undefined && !(out && out.images && out.images.length)) {
         // 不是本次手工提交的执行（完整 Queue 透传等）：保持等待，别提前复位
         if (pidMismatch) return;
         fx.resetSplitBtn();
-        M.els.status.textContent = "本次执行没有产生新草稿（源可能没变化被缓存）。改一下 source 再试，或点 ⟲重置";
+        M.els.status.textContent = "本次执行没有产生新草稿/改稿提案（源可能没变化被缓存）。改一下 source 再试，或点 ⟲重置";
         M.els.status.className = "mps-status err";
         return;
       }
@@ -334,7 +381,7 @@ export function mountRunStatus(ctx) {
     try { fx.applyWidthPin(); } catch (e) { /* noop */ }
     // 拆解/注入/提交任一在飞都不得重建画布：此时改 source 会让画布瞬间重置回
     // caption 视图、清撤销栈，且在飞结果会因签名失配被丢弃（审查 P1-11）。
-    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
+    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.editBtn || M.submitting);
     const sig = fx.currentSig();
     if (sig === M.pendSig) {
       // source 改变时以 source 为准；edits 只作为 source 为空/加载恢复时的回退
@@ -352,7 +399,7 @@ export function mountRunStatus(ctx) {
       fx.resetSplitBtn();
       M.builtSig = M.pendSig = fx.currentSig();
       const waitedS = Math.round((Date.now() - (M.splitAt || 0)) / 1000);
-      M.els.status.textContent = `拆解/注入超时（${waitedS}s 无结果）：已复位，请检查 LLM 配置后重试`;
+      M.els.status.textContent = `拆解/注入/改稿超时（${waitedS}s 无结果）：已复位，请检查 LLM 配置后重试`;
       M.els.status.className = "mps-status err";
     }
   }, 700);

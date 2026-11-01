@@ -1,0 +1,212 @@
+[
+  {
+    "name": "set_caption 只换 head，分段与遮挡后缀保留",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "天台黄昏的双人对峙。", "meta": ["电影感"], "canvas": "single"},
+      "items": [
+        {"label": "character", "caption": "红裙女战士站在左侧；姿势：双手叉腰；服装：身穿红色长裙，处于最前层，部分遮挡相邻元素", "bbox": [64, 128, 448, 896]},
+        {"label": "text", "caption": "顶部标题。", "text": "天台之上", "bbox": [256, 16, 768, 96]}
+      ]
+    },
+    "ops": [
+      {"op": "set_caption", "target": {"index": 0, "label": "character", "head_prefix": "红裙女战士站在"}, "reason": "用户要求改为持剑", "head": "红裙女战士站在左侧，手持长剑"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 0, "dropped": 0,
+      "items0_caption": "红裙女战士站在左侧，手持长剑；姿势：双手叉腰；服装：身穿红色长裙，处于最前层，部分遮挡相邻元素"
+    }
+  },
+  {
+    "name": "指纹不匹配拒收，其余 op 照常",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "极简海报。"},
+      "items": [
+        {"label": "object", "caption": "下中部蓝色山脉插画。", "bbox": [128, 384, 896, 896]},
+        {"label": "text", "caption": "标题。", "text": "探索世界", "bbox": [256, 96, 768, 224]}
+      ]
+    },
+    "ops": [
+      {"op": "set_text", "target": {"index": 1, "label": "text", "head_prefix": "完全对不上的前缀"}, "reason": "改标题", "text": "秋日市集"},
+      {"op": "set_summary", "fields": {"meta": ["poster", "autumn"]}, "reason": "补标签"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 1, "dropped": 0,
+      "rejected0_reason_contains": "head_prefix",
+      "summary_meta": ["poster", "autumn"],
+      "items1_text": "探索世界"
+    }
+  },
+  {
+    "name": "scope：越界/新增/summary 三类拒收",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "双人场景。"},
+      "items": [
+        {"label": "character", "caption": "左侧女战士。", "bbox": [64, 128, 448, 896]},
+        {"label": "character", "caption": "右侧男队员。", "bbox": [576, 128, 960, 896]}
+      ]
+    },
+    "ops": [
+      {"op": "set_caption", "target": {"index": 1, "label": "character", "head_prefix": "右侧男队员。"}, "reason": "越界改动", "head": "右侧男队员换装。"},
+      {"op": "add_item", "reason": "越界新增", "item": {"label": "object", "caption": "一只猫。", "bbox": [800, 700, 1000, 950]}},
+      {"op": "set_summary", "fields": {"caption": "新全局。"}, "reason": "越界改 summary"},
+      {"op": "set_caption", "target": {"index": 0, "label": "character", "head_prefix": "左侧女战士。"}, "reason": "范围内改动", "head": "左侧红裙女战士。"}
+    ],
+    "scope": {"indexes": [0], "summary": false},
+    "expect": {
+      "applied": 1, "rejected": 3, "dropped": 0,
+      "items_len": 2,
+      "items0_caption": "左侧红裙女战士。"
+    }
+  },
+  {
+    "name": "remove+add 组合当替换：新条目追加在末尾",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "静物。"},
+      "items": [
+        {"label": "object", "caption": "陶瓷杯。", "bbox": [176, 224, 800, 864]},
+        {"label": "text", "caption": "标题。", "text": "把日常，过成诗。", "bbox": [628, 272, 1008, 448]}
+      ]
+    },
+    "ops": [
+      {"op": "remove_item", "target": {"index": 0, "label": "object", "head_prefix": "陶瓷杯。"}, "reason": "替换主体"},
+      {"op": "add_item", "reason": "替换为新主体", "item": {"label": "object", "caption": "玻璃花瓶。", "bbox": [200, 300, 780, 860]}}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 2, "rejected": 0, "dropped": 0,
+      "items_len": 2,
+      "items0_label": "text",
+      "items1_caption": "玻璃花瓶。"
+    }
+  },
+  {
+    "name": "set_summary 部分更新（meta+palette）",
+    "draft": {
+      "width": 512, "height": 512, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "原描述。", "meta": ["旧标签"], "canvas": "single"},
+      "items": [
+        {"label": "object", "caption": "主体。", "bbox": [16, 16, 496, 496]}
+      ]
+    },
+    "ops": [
+      {"op": "set_summary", "fields": {"meta": [], "palette": ["#F4EFE6"]}, "reason": "换色调"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 0, "dropped": 0,
+      "summary_caption": "原描述。",
+      "summary_meta": [],
+      "summary_palette": ["#F4EFE6"]
+    }
+  },
+  {
+    "name": "重复删除同一目标拒收",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "多物体。"},
+      "items": [
+        {"label": "object", "caption": "杯子。", "bbox": [0, 0, 100, 100]},
+        {"label": "object", "caption": "盘子。", "bbox": [200, 200, 400, 400]}
+      ]
+    },
+    "ops": [
+      {"op": "remove_item", "target": {"index": 0, "label": "object", "head_prefix": "杯子。"}, "reason": "删除"},
+      {"op": "remove_item", "target": {"index": 0, "label": "object", "head_prefix": "杯子。"}, "reason": "重复删除"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 1, "dropped": 0,
+      "items_len": 1,
+      "items0_caption": "盘子。"
+    }
+  },
+  {
+    "name": "未知 op 类型与未知字段拒收",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "场景。"},
+      "items": [
+        {"label": "object", "caption": "主体。", "bbox": [0, 0, 100, 100]}
+      ]
+    },
+    "ops": [
+      {"op": "reorder_items", "reason": "不支持的类型"},
+      {"op": "set_caption", "target": {"index": 0, "label": "object", "head_prefix": "主体。"}, "reason": "带未知字段", "head": "新描述。", "extra": 1},
+      {"op": "set_caption", "target": {"index": 0, "label": "object", "head_prefix": "主体。"}, "reason": "合法改动", "head": "新描述。"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 2, "dropped": 0,
+      "items0_caption": "新描述。"
+    }
+  },
+  {
+    "name": "move_resize 接受小数 bbox",
+    "draft": {
+      "width": 512, "height": 512, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "场景。"},
+      "items": [
+        {"label": "object", "caption": "主体。", "bbox": [10, 10, 100, 100]}
+      ]
+    },
+    "ops": [
+      {"op": "move_resize", "target": {"index": 0, "label": "object", "head_prefix": "主体。"}, "reason": "挪到右下", "bbox": [10.5, 20.25, 300.5, 400.75]}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 1, "rejected": 0, "dropped": 0,
+      "items0_bbox": [10.5, 20.25, 300.5, 400.75]
+    }
+  },
+  {
+    "name": "全部拒收：proposed 等于原稿且不报错",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "场景。"},
+      "items": [
+        {"label": "object", "caption": "主体。", "bbox": [0, 0, 100, 100]}
+      ]
+    },
+    "ops": [
+      {"op": "set_text", "target": {"index": 0, "label": "object", "head_prefix": "主体。"}, "reason": "非 text 条目", "text": "X"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 0, "rejected": 1, "dropped": 0,
+      "proposed_equals_draft": true
+    }
+  },
+  {
+    "name": "超出 8 条按列出顺序截断",
+    "draft": {
+      "width": 1024, "height": 1024, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+      "summary": {"caption": "初始。", "meta": []},
+      "items": [
+        {"label": "object", "caption": "主体。", "bbox": [0, 0, 200, 200]}
+      ]
+    },
+    "ops": [
+      {"op": "set_summary", "fields": {"caption": "第1条。"}, "reason": "1"},
+      {"op": "set_summary", "fields": {"caption": "第2条。"}, "reason": "2"},
+      {"op": "set_summary", "fields": {"caption": "第3条。"}, "reason": "3"},
+      {"op": "set_summary", "fields": {"caption": "第4条。"}, "reason": "4"},
+      {"op": "set_summary", "fields": {"caption": "第5条。"}, "reason": "5"},
+      {"op": "set_summary", "fields": {"caption": "第6条。"}, "reason": "6"},
+      {"op": "set_summary", "fields": {"caption": "第7条。"}, "reason": "7"},
+      {"op": "set_summary", "fields": {"caption": "第8条。"}, "reason": "8"},
+      {"op": "set_summary", "fields": {"caption": "第9条。"}, "reason": "9"},
+      {"op": "set_summary", "fields": {"caption": "第10条。"}, "reason": "10"}
+    ],
+    "scope": null,
+    "expect": {
+      "applied": 8, "rejected": 0, "dropped": 2,
+      "summary_caption": "第8条。"
+    }
+  }
+]

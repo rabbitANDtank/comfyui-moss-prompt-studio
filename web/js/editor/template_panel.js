@@ -22,10 +22,12 @@ export function mountTemplatePanel(ctx) {
     if (M.splitBtn) { M.splitBtn.disabled = false; M.splitBtn.textContent = "⚡拆解"; M.splitBtn = null; }
     if (M.poseBtn) { M.poseBtn.disabled = false; M.poseBtn.textContent = "📥姿势"; M.poseBtn = null; }
     if (M.costumeBtn) { M.costumeBtn.disabled = false; M.costumeBtn.textContent = "📥服装"; M.costumeBtn = null; }
+    if (M.editBtn) { M.editBtn.disabled = false; M.editBtn.textContent = "⤢改稿"; M.editBtn = null; }
     // 提交已结束（结果到达/失败/超时/队列空）：清掉本次提交的 source 归属记录
     M.splitSrcSig = "";
     M.poseSrcSig = "";
     M.costumeSrcSig = "";
+    M.editSrcSig = "";
     M.submitting = false;
     // 最近一次手工提交也随本次提交结束而失效：之后到达的完整 Queue 结果没有
     // 匹配对象，回退到 mps_src_sig/pending 判断，不会被 prompt_id 误杀（P1）。

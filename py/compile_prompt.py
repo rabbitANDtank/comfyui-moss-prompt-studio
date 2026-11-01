@@ -151,19 +151,17 @@ def compile_bbox(b, w: int, h: int):
 
 
 def compile_draft(d: dict) -> str:
-    """草稿 dict → 模型输入的单行紧凑 JSON 字符串。"""
+    """草稿 dict → 模型输入的单行紧凑 JSON 字符串。
+
+    item 键序与官方一致：按输入顺序直通（bbox 仅做坐标换算），保证与官方
+    compile_prompt.py 的输出逐字节可对拍（tests/py/test_golden_official.py 差分）。
+    """
     w, h = validate_draft(d)
-    out_items = []
-    for it in d["items"]:
-        o = {"label": it["label"], "caption": it["caption"]}
-        if "text" in it:
-            o["text"] = it["text"]
-        if "tags" in it:
-            o["tags"] = it["tags"]
-        if "palette" in it:
-            o["palette"] = it["palette"]
-        o["bbox"] = compile_bbox(it["bbox"], w, h)
-        out_items.append(o)
+    out_items = [
+        {key: (compile_bbox(value, w, h) if key == "bbox" else value)
+         for key, value in it.items()}
+        for it in d["items"]
+    ]
     result = {
         "summary": d["summary"],
         "items": out_items,

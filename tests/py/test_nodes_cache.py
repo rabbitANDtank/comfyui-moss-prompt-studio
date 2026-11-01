@@ -371,6 +371,8 @@ def test_editor_legacy_widget_order():
         "pose_mode", "apply_pose", "pose_in", "pose_in_2",
         # v1.8 服装注入：全部追加在姿势控件之后，旧工作流索引不变
         "costume_mode", "apply_costume", "costume_in", "costume_in_2",
+        # P1a AI 定向改稿：尾追在服装控件之后，旧工作流索引不变
+        "edit_request", "edit_scope", "apply_edit",
     ]
 
 

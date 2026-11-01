@@ -7,6 +7,7 @@ AGENT.md
 # agents/ 目录：用户自建的个人指令文件不进仓库，仅保留自带示例
 agents/*
 !agents/cinematic-example.md
+!agents/revision-example.md
 
 # Python
 __pycache__/

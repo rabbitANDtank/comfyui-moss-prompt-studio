@@ -11,6 +11,7 @@ import json
 
 try:
     from ..py.dims import snap16
+    from ..py.edit_ops import parse_edit_scope, revise_draft
     from ..py.sniff import sniff
     from ..py.translate import (
         AGENT_DEFAULT,
@@ -30,6 +31,7 @@ try:
     )
 except ImportError:  # 兼容非包方式导入
     from py.dims import snap16
+    from py.edit_ops import parse_edit_scope, revise_draft
     from py.sniff import sniff
     from py.translate import (
         AGENT_DEFAULT,
@@ -68,6 +70,7 @@ class MOSSEditor:
                    last_applied_sig="", edits_source_sig="", force_split=False,
                    pose_in="", pose_in_2="", pose_mode="自动", apply_pose=-1,
                    costume_in="", costume_in_2="", costume_mode="自动", apply_costume=-1,
+                   edit_request="", edit_scope="", apply_edit=-1,
                    provider="mimo", base_url="", model="", api_key="EMPTY",
                    temperature=0.3, thinking="off", timeout=180, ai_prompt="",
                    agent_md=AGENT_DEFAULT, **kwargs):
@@ -83,6 +86,9 @@ class MOSSEditor:
         if isinstance(apply_pose, int) and apply_pose != -1:
             return float("nan")
         if isinstance(apply_costume, int) and apply_costume != -1:
+            return float("nan")
+        # ⤢改稿按钮同理（apply_edit=-2）：绕过缓存保证 ui.mps_ops 必达
+        if isinstance(apply_edit, int) and apply_edit != -1:
             return float("nan")
         # LLM 配置与 AGENT.md/config.json 实际内容也要进缓存键（与 Translator 同款）：
         # 否则改 provider/model/thinking/ai_prompt 后普通 Queue 会命中旧缓存，新配置不生效。
@@ -107,6 +113,7 @@ class MOSSEditor:
                 "pose_mode": pose_mode or "自动",
                 "costume_in": costume_in or "", "costume_in_2": costume_in_2 or "",
                 "costume_mode": costume_mode or "自动",
+                "edit_request": edit_request or "", "edit_scope": edit_scope or "",
                 "provider": provider, "base_url": base_url, "model": model,
                 "api_key": api_key, "temperature": temperature,
                 "thinking": thinking, "timeout": timeout, "ai_prompt": ai_prompt,
@@ -235,6 +242,20 @@ class MOSSEditor:
                     "placeholder": "服装参考②：双人分别指定时给另一角色",
                     "tooltip": "服装参考②：双人分别指定服装时给另一角色（与 costume_in 配对）；手填或连接第二个 Costume Gallery 的 description",
                 }),
+                # AI 定向改稿（P1a）：尾追在服装控件之后，旧工作流 widgets_values 不错位
+                "edit_request": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "AI 改稿：一句话修改要求，如「把标题改成『秋日』」「右侧加一只猫」「裙子改成红色」",
+                    "tooltip": "AI 定向改稿：一句话修改要求。仅在 apply_edit≠-1（前端 ⤢改稿 按钮，或 API 显式设置）时调用 LLM；结果经 ui.mps_ops 送审批卡逐条采纳，未被 op 引用的元素逐字节不动。普通 Queue 不生效、不计费",
+                }),
+                "edit_scope": ("STRING", {
+                    "default": "", "hidden": True, "socketless": True,
+                    "tooltip": "内部：改稿范围 JSON {\"indexes\":[...],\"summary\":bool}；空=全稿。⤢改稿 按钮按画布选中项自动填写",
+                }),
+                "apply_edit": ("INT", {
+                    "default": -1, "min": -2, "max": 63, "hidden": True, "socketless": True,
+                    "tooltip": "内部：⤢改稿 按钮提交时经 payload overrides 传入 -2（存档保持 -1，普通 Queue 不触发）；API 用户显式设 -2 可在无前端时自动应用改稿结果",
+                }),
             },
         }
 
@@ -245,9 +266,15 @@ class MOSSEditor:
             replace_edits=True, last_applied_sig="", edits_source_sig="",
             force_split=False, pose_in=None, pose_in_2=None, pose_mode="自动",
             apply_pose=-1, costume_in=None, costume_in_2=None, costume_mode="自动",
-            apply_costume=-1, unique_id=None):
+            apply_costume=-1, edit_request="", edit_scope="", apply_edit=-1,
+            unique_id=None):
         # reverse_in / replace_edits / last_applied_sig 只供前端反推写回使用，后端不参与解析
         # source/edits 优先级：edits 只对写入时的那份 source 生效；换源后以 source 为准。
+        # 旧工作流 widgets_values 错位可能把 INT 控件（apply_*）解成 ""（服务端 400
+        # "Failed to convert to INT"）——后端兜底归一，与前端 normalizePoseWidgets 同语义。
+        apply_pose, apply_costume, apply_edit = [
+            v if isinstance(v, int) and not isinstance(v, bool) else -1
+            for v in (apply_pose, apply_costume, apply_edit)]
         text = resolve_editor_text(source, edits, edits_source_sig)
         info = sniff(text, canvas_width, canvas_height)
         ui = {}
@@ -282,6 +309,40 @@ class MOSSEditor:
             # 结果是否属于当前 source（P1-3/P1-4），不再只依赖内存里的 pending 槽位。
             # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
             ui["mps_src_sig"] = source_signature((source or "").strip())
+
+        elif (isinstance(apply_edit, int) and not isinstance(apply_edit, bool)
+              and apply_edit != -1):
+            # ⤢改稿（AI 定向改稿）：LLM 只产 ops，本地应用；未被 op 引用的条目
+            # 逐字节不动。ui.mps_ops 是独立通道（不占 mps_draft）：旧前端未知键
+            # 直接忽略，最坏"没反应"，绝不未经审批自动改画布（版本偏斜防护）。
+            # headless/API 用户（无前端审批卡）：节点 draft 输出=改稿结果，即自动应用。
+            if info["kind"] != "layout":
+                raise ValueError(
+                    "AI 改稿需要拆解完成的画布（layout 形态）；当前输入是散文/caption，请先点 ⚡拆解")
+            req = (edit_request or "").strip()
+            if not req:
+                raise ValueError(
+                    "apply_edit 已启用但 edit_request 为空：请填写修改要求，或把 apply_edit 设回 -1")
+            scope = parse_edit_scope(edit_scope)
+            cfg = load_config()
+            url, mdl = resolve_endpoint(provider, base_url, model, thinking, cfg)
+            key, _auth = resolve_api_key(provider, base_url or url, api_key, cfg)
+            rev = revise_draft(
+                info["draft"], req, scope,
+                base_url=url, api_key=key, model=mdl,
+                temperature=temperature, thinking=thinking, provider=provider,
+                timeout=int(timeout), agent_md=agent_md,
+            )
+            info = {"kind": "layout", "draft": rev["draft"]}
+            # mps_ops 走 JSON 字符串（与 mps_draft 同款序列化，前端做 array-join 兼容）
+            ui["mps_ops"] = json.dumps({
+                "ops": rev["applied"], "rejected": rev["rejected"],
+                "dropped": rev["dropped"],
+                # 双 sig 锚定（评审 BLOCKING-1 修正：两端统一 source_signature 算法）
+                "src_sig": source_signature((source or "").strip()),
+                "edits_sig": source_signature((text or "").strip()),
+                "request": req, "scope": scope,
+            }, ensure_ascii=False)
 
         elif ai_draft and info["kind"] == "caption":
             cfg = load_config()
