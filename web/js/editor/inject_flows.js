@@ -56,6 +56,11 @@ export function mountInjectFlows(ctx) {
     const items = (M.S.d && M.S.d.items) || [];
     let sel = -1;
     if (M.sel != null && items[M.sel] && items[M.sel].label === "character") sel = M.sel;
+    // 多格分镜：自动分配按"左右/面积"假设单场景，跨格分配语义错误——只允许选中注入
+    if (sel < 0 && M.S.d.summary && M.S.d.summary.canvas === "multi_panel") {
+      fail("多格分镜（multi_panel）：自动分配不适用——请在画布选中要注入的角色（只注入它），或把检查器 canvas 切回 single");
+      return;
+    }
     M.submitting = true;
     btn.disabled = true;
     btn.textContent = "⏳注入中…";
@@ -181,6 +186,11 @@ export function mountInjectFlows(ctx) {
     const items = (M.S.d && M.S.d.items) || [];
     let sel = -1;
     if (M.sel != null && items[M.sel] && items[M.sel].label === "character") sel = M.sel;
+    // 多格分镜：自动分配按"左右/面积"假设单场景，跨格分配语义错误——只允许选中注入
+    if (sel < 0 && M.S.d.summary && M.S.d.summary.canvas === "multi_panel") {
+      fail("多格分镜（multi_panel）：自动分配不适用——请在画布选中要注入的角色（只注入它），或把检查器 canvas 切回 single");
+      return;
+    }
     M.submitting = true;
     btn.disabled = true;
     btn.textContent = "⏳注入中…";
@@ -344,8 +354,11 @@ export function mountInjectFlows(ctx) {
     const sensitiveWarn = costumeTexts.some(costumeIsSensitive)
       ? "\n⚠ 服装参考属于内衣/性感/泳装分类，将随拆解发送到 LLM，请确认用途与内容合规"
       : "";
+    // multi_panel 画布点拆解：LLM 提示词固定产出 canvas:"single"，模式会被无声重置（提示而非拦截）
+    const mpHint = (M.S && M.S.kind === "layout" && M.S.d.summary && M.S.d.summary.canvas === "multi_panel")
+      ? "\n⚠ 当前画布为多格分镜（multi_panel）：⚡拆解 将重建为单画布草稿，多格模式不会保留" : "";
     M.els.status.textContent = "⏳ AI 拆解中…（LLM 生成布局草稿，通常 10~120 秒，完成后画布自动刷新）"
-      + (linkWarn ? "\n" + linkWarn : "") + sensitiveWarn;
+      + (linkWarn ? "\n" + linkWarn : "") + sensitiveWarn + mpHint;
     M.els.status.className = "mps-status";
     try {
       // 以整个工作流当前状态取数，再裁剪出编辑器及其上游子图：

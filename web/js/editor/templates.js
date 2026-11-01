@@ -193,7 +193,7 @@ export const TEMPLATES = [
   {
     id: "four_panel_storyboard",
     name: "四格分镜",
-    description: "2×2 四格分镜，每格一个场景 + 一条台词文字区。",
+    description: "2×2 四格分镜，每格一个场景 + 一条台词文字区。载入后可直接 ⤢改稿 批量填格（如：把四格分别改为……）。",
     draft: {
       width: 1024,
       height: 1024,
@@ -249,6 +249,110 @@ export const TEMPLATES = [
           label: "object",
           caption: "第四格：场景收束，交代结果或情绪",
           bbox: [528, 528, 992, 992],
+        },
+      ],
+    },
+  },
+  {
+    id: "manga_strip_1x3",
+    name: "条漫 1×3",
+    description: "竖排三格条漫，自上而下推进，每格一个场景 + 一条台词。载入后可直接 ⤢改稿 批量填格。",
+    draft: {
+      width: 1024,
+      height: 1536,
+      bbox_coord_space: "abs",
+      bbox_format: "xyxy",
+      summary: {
+        caption: "示例版式：1×3 竖排条漫，三格自上而下依次推进，每格一个场景与一条台词。",
+        meta: ["manga strip", "comic panel"],
+        canvas: "multi_panel",
+        palette: ["#22303c", "#e9e2d0", "#c96f4a"],
+      },
+      items: [
+        {
+          label: "object",
+          caption: "第一格：开场场景，交代时间地点与人物状态",
+          bbox: [24, 24, 1000, 504],
+        },
+        {
+          label: "object",
+          caption: "第二格：情节推进，动作或对话的展开",
+          bbox: [24, 528, 1000, 1008],
+        },
+        {
+          label: "object",
+          caption: "第三格：收束格，给出结果或情绪落点",
+          bbox: [24, 1032, 1000, 1512],
+        },
+        {
+          label: "text",
+          caption: "第一格台词：格内底部文字区",
+          text: "第一格台词",
+          bbox: [48, 392, 976, 492],
+        },
+        {
+          label: "text",
+          caption: "第二格台词：格内底部文字区",
+          text: "第二格台词",
+          bbox: [48, 896, 976, 996],
+        },
+        {
+          label: "text",
+          caption: "第三格台词：格内底部文字区",
+          text: "第三格台词",
+          bbox: [48, 1400, 976, 1500],
+        },
+      ],
+    },
+  },
+  {
+    id: "character_three_view",
+    name: "角色三视图",
+    description: "同一角色的正面/侧面/背面全身设定图，三格并排。",
+    draft: {
+      width: 1536,
+      height: 1024,
+      bbox_coord_space: "abs",
+      bbox_format: "xyxy",
+      summary: {
+        caption: "示例版式：角色三视图设定图，同一角色在三个分格中分别呈现正面、侧面与背面全身站姿，纯色背景，服装发色配饰保持一致。",
+        meta: ["character sheet", "three-view"],
+        canvas: "multi_panel",
+        palette: ["#d8d3c8", "#3a3a3a", "#8a2f2f"],
+      },
+      items: [
+        {
+          label: "character",
+          caption: "左格：同一角色的正面全身站姿，双臂自然下垂，表情平静",
+          bbox: [24, 24, 504, 1000],
+        },
+        {
+          label: "character",
+          caption: "中格：同一角色的侧面（左向）全身站姿，与正面同一套服装与发型",
+          bbox: [528, 24, 1008, 1000],
+        },
+        {
+          label: "character",
+          caption: "右格：同一角色的背面全身站姿，展示背部服装与发型细节",
+          bbox: [1032, 24, 1512, 1000],
+        },
+        {
+          label: "text",
+          caption: "左格标签：视图名称",
+          text: "正面",
+          bbox: [200, 900, 328, 976],
+        },
+        {
+          label: "text",
+          caption: "中格标签：视图名称",
+          text: "侧面",
+          bbox: [704, 900, 832, 976],
+        },
+        {
+          label: "text",
+          caption: "右格标签：视图名称",
+          text: "背面",
+          bbox: [1208, 900, 1336, 976],
         },
       ],
     },

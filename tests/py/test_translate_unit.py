@@ -7,7 +7,7 @@ import json
 from py.compile_prompt import compile_draft, validate_draft  # noqa: F401
 from py.sniff import sniff  # noqa: F401
 from py.translate import (TranslationError, build_body, check_translation,  # noqa: F401
-                          extract_json, resolve_endpoint)
+                          DEFAULT_AI_DRAFT_PROMPT, extract_json, resolve_endpoint)
 from nodes.image_reverse import resolve_reverse_options  # noqa: F401
 
 
@@ -202,3 +202,10 @@ def test_extract_json_truncated_string_raises():
     # 未转义引号 + 截断收尾括号的正常修复路径不受影响
     out = extract_json('{"summary":{"caption":"a 20" pipe"')
     assert out["summary"]["caption"] == 'a 20" pipe'
+
+
+def test_split_prompt_pins_canvas_single():
+    """钉死 ⚡拆解 提示词的 canvas:"single" 硬编码：这是 multi_panel 模式在
+    ⚡拆解 后回退 single 的根因（前端已有回退提示）。将来做 canvas 感知拆解时
+    本断言随设计一起修改。"""
+    assert '"canvas": "single"' in DEFAULT_AI_DRAFT_PROMPT

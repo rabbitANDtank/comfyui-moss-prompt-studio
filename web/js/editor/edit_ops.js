@@ -79,7 +79,7 @@ export function checkOp(op, origItems, w, h, scope, removed) {
   if (unknown.length) return `op 含未知字段: ${JSON.stringify(unknown)}`;
   const missing = required.filter((k) => !(k in op));
   if (missing.length) return `缺少必填字段: ${JSON.stringify(missing)}`;
-  if (typeof op.reason !== "string" || !op.reason.trim()) return "reason 必填（审批卡展示用）";
+  if (typeof op.reason !== "string" || !op.reason.trim()) op.reason = "（LLM 未说明理由）"; // 纯展示字段，缺失兜底
 
   if (kind === "set_summary") {
     if (scope && !scope.summary) return "scope 限定时不允许修改 summary";

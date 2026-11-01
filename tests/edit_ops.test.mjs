@@ -160,3 +160,16 @@ test("常量与 py 侧 FNV 黄金对拍（跨语言契约）", () => {
   assert.equal(sourceSignature(EDIT_OP_TYPES.join(",")), "fnv1a:a3f6b8de");
   assert.equal(sourceSignature(EDIT_SEGMENT_KEYS.join(",")), "fnv1a:39f031be");
 });
+
+
+test("reason 缺失自动补默认文案，不拒收（真机空卡根因）", () => {
+  const draft = {
+    width: 512, height: 512, bbox_coord_space: "abs", bbox_format: "xyxy",
+    summary: { caption: "场景。" },
+    items: [{ label: "object", caption: "主体。", bbox: [16, 16, 480, 480] }],
+  };
+  const out = applyOps(draft, [{ op: "set_summary", fields: { meta: ["x"] } }]);
+  assert.equal(out.rejected.length, 0);
+  assert.equal(out.applied.length, 1);
+  assert.equal(out.applied[0].reason, "（LLM 未说明理由）");
+});

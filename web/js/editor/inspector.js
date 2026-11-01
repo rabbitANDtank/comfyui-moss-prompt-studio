@@ -59,12 +59,17 @@ export function mountInspector(ctx) {
     inp.title = "整图体裁标签，逗号分隔（原文会作为独立 JSON 字段进入提示词）";
     fx.bindField(inp, (v) => fx.setOptArr(s, "meta")(csvParse(v)));
     row.appendChild(l); row.appendChild(inp); insp.appendChild(row);
-    if ("canvas" in s) {
+    {
       const row2 = document.createElement("div"); row2.className = "mps-row";
-      const l2 = document.createElement("label"); l2.textContent = "canvas";
+      const l2 = document.createElement("label"); l2.textContent = "canvas 画布模式";
       const selc = document.createElement("select");
-      VALID_CANVAS.forEach((c) => selc.appendChild(new Option(c, c)));
-      selc.value = s.canvas;
+      // 多面板（multi_panel）：四格/条漫/三视图分镜，配合 📐模板 的分镜版式；
+      // collage 虽是官方枚举但未实验，不主动提供（外来草稿若带该值如实显示）
+      const opts = ["single", "multi_panel"];
+      if (s.canvas && !opts.includes(s.canvas)) opts.push(s.canvas);
+      opts.forEach((c) => selc.appendChild(new Option(c, c)));
+      selc.value = s.canvas || "single";
+      selc.title = "整图画布模式。multi_panel：一条 prompt 生成多格分镜（分格由元素框的位置决定）；⚡拆解/⚡反推 会把该字段重建为 single";
       selc.addEventListener("change", () => { fx.pushUndo(fx.snapshot()); s.canvas = selc.value; fx.afterChange(); });
       row2.appendChild(l2); row2.appendChild(selc); insp.appendChild(row2);
     }

@@ -189,9 +189,9 @@ def _check_op(op, orig_items, w, h, scope, removed) -> str:
     missing = [k for k in required if k not in op]
     if missing:
         return f"缺少必填字段: {missing}"
-    reason = op.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        return "reason 必填（审批卡展示用）"
+    if not isinstance(op.get("reason"), str) or not op["reason"].strip():
+        # reason 纯展示（审批卡），缺失不拒收——LLM 偶发漏字段不应产出空提案卡（真机 11-02）
+        op["reason"] = "（LLM 未说明理由）"
 
     if kind == "set_summary":
         if scope is not None and not scope["summary"]:

@@ -347,6 +347,8 @@ export function mountEditsSync(ctx) {
       source: ctx.wSource ? ctx.wSource.value : "",
     });
     if (decision !== "apply") return { ok: decision === "same", skipped: decision };
+    // 写回前捕获旧画布模式：反推产物固定 canvas:"single"，原 multi_panel 多格不会保留
+    const prevCanvas = M.S && M.S.kind === "layout" && M.S.d.summary ? M.S.d.summary.canvas : "";
 
     if (p.width) setWidgetInput(ctx.wCw, p.width);
     if (p.height) setWidgetInput(ctx.wCh, p.height);
@@ -369,7 +371,7 @@ export function mountEditsSync(ctx) {
     // 记录只存 owner/sig/mode + draftHash（不重复保存整份画布文本，控制工作流体积）
     if (ctx.wSig) setWidgetInput(ctx.wSig, reverseRecord(node.id, p.sig, p.mode, ctx.wEdits ? ctx.wEdits.value : ""));
     fx.updateStatus();
-    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}）${p.mode === "canvas" ? "，可直接 ⤢改稿 迭代（如：把主标题改成…）" : "，再 Queue 一次完整链路生效"}`, "ok");
+    fx.rememberRun(`📨 反推结果已写回（${p.mode === "prose" ? "散文→source" : p.mode === "draft" ? "草稿→source·已关自动拆解" : "画布→edits"}）${p.mode === "canvas" ? "，可直接 ⤢改稿 迭代（如：把主标题改成…）" : "，再 Queue 一次完整链路生效"}${prevCanvas === "multi_panel" ? "。⚠ 原多格分镜（multi_panel）不会保留：反推产物固定为单画布" : ""}`, "ok");
     return { ok: true };
   };
 

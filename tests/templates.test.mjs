@@ -50,6 +50,7 @@ test("六个版式类型齐备（竖版海报/方形社媒/电商主图/杂志�
   for (const id of [
     "vertical_poster", "square_social", "ecommerce_hero",
     "magazine_cover", "character_card", "four_panel_storyboard",
+    "manga_strip_1x3", "character_three_view",
   ]) {
     assert.ok(templateById(id), `缺少模板: ${id}`);
   }
@@ -57,6 +58,11 @@ test("六个版式类型齐备（竖版海报/方形社媒/电商主图/杂志�
   assert.equal(storyboard.draft.summary.canvas, "multi_panel");
   assert.equal(storyboard.draft.items.filter((it) => it.label === "object").length, 4);
   assert.equal(storyboard.draft.items.filter((it) => it.label === "text").length, 4);
+  for (const id of ["manga_strip_1x3", "character_three_view"]) {
+    const t = templateById(id);
+    assert.equal(t.draft.summary.canvas, "multi_panel", `${id}: 分镜模板必须带 multi_panel`);
+    assert.ok(t.draft.items.length >= 4, `${id}: 分镜模板至少 4 项`);
+  }
 });
 
 test("draft 使用官方 layout 字段：abs/xyxy + summary.caption/meta/canvas/palette", () => {

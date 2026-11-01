@@ -358,3 +358,15 @@ def test_editor_apply_pose_misaligned_string_normalized():
         ai_draft=False, apply_pose="")
     assert not isinstance(ret, dict)
     assert json.loads(ret[0]) == draft
+
+
+def test_reason_missing_filled_not_rejected():
+    """reason 纯展示字段：LLM 偶发漏字段时自动补默认文案，不拒收（真机 11-02 空卡根因）。"""
+    draft = {
+        "width": 512, "height": 512, "bbox_coord_space": "abs", "bbox_format": "xyxy",
+        "summary": {"caption": "场景。", "meta": []},
+        "items": [{"label": "object", "caption": "主体。", "bbox": [16, 16, 480, 480]}],
+    }
+    out = apply_ops(draft, [{"op": "set_summary", "fields": {"meta": ["x"]}}])
+    assert len(out["applied"]) == 1 and not out["rejected"]
+    assert out["applied"][0]["reason"] == "（LLM 未说明理由）"

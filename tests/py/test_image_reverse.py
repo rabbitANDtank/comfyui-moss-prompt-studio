@@ -199,3 +199,9 @@ def test_vision_style_and_filters():
     assert "meta" in out2["summary"] and "palette" not in out2["summary"]
     assert all("tags" not in it and "palette" not in it for it in out2["items"])
     assert any(it["label"] == "text" for it in out2["items"])
+
+
+def test_vision_prompt_pins_canvas_single():
+    """钉死 ⚡反推 提示词的 canvas:"single" 硬编码（multi_panel 回退根因之一）。"""
+    from py.vision import DEFAULT_VISION_PROMPT
+    assert '"canvas": "single"' in DEFAULT_VISION_PROMPT
