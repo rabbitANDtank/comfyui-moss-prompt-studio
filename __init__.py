@@ -4,7 +4,7 @@
 """
 from .nodes import MOSSCompiler, MOSSEditor, MOSSImageReverse, MOSSTranslator
 
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 NODE_CLASS_MAPPINGS = {
     "MOSSEditor": MOSSEditor,

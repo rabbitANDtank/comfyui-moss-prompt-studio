@@ -90,14 +90,18 @@ export function buildDomShell(ctx) {
   const btnCopy = mkBtn("⧉复制", async () => {
     try { await navigator.clipboard.writeText(ctx.wEdits.value || ""); btnCopy.textContent = "已复制"; setTimeout(() => (btnCopy.textContent = "⧉复制"), 1200); } catch (e) { /* noop */ }
   }, "复制编辑后的草稿 JSON");
+  // ⤓提交：手动冲洗画布到 edits 并体检（元素数/尺寸/归属签名），与 Queue 前自动
+  // flush 同一条路径；自动链路是兜底，这里是显式确认点——点完就知道下次 Queue 提交什么。
+  const btnCommit = mkBtn("⤓提交", () => fx.commitNow(),
+    "把当前画布（尺寸/元素/注入结果）立即写入 edits 并检查：显示将提交的元素数与尺寸；归属签名不一致会红字警告（后端将改用 source）。正常流程 Queue 前会自动做同样检查，本按钮用于手动确认");
   // ⚡拆解：只提交编辑器单节点执行（OUTPUT_NODE），结果经事件总线写回画布。
   // 最常用入口：主色（降饱和蓝）+加大，排在第二行最右、⇄同步/⧉复制 正下方。
   const btnSplit = mkBtn("⚡拆解", () => fx.runAiSplit(btnSplit), "把 source 散文拆解为布局草稿（只执行本节点，不跑整个工作流）");
   btnSplit.classList.add("mps-primary");
-  // 第一行右端：⇄同步 / ⧉复制（与 ↩撤销/+物体/+人物 那一排横向对齐）
+  // 第一行右端：⇄同步 / ⧉复制 / ⤓提交（与 ↩撤销/+物体/+人物 那一排横向对齐）
   const tbUtil = document.createElement("div");
   tbUtil.className = "mps-tb-end";
-  tbUtil.append(btnSync, btnCopy);
+  tbUtil.append(btnSync, btnCopy, btnCommit);
   tbLine1.appendChild(tbUtil);
   // 📥姿势：把 pose_in/pose_in_2 的图库姿势短语本地注入已拆解画布的角色 caption
   // （不调 LLM、免费秒完成；要 LLM 展开的丰富动作描述走 ⚡拆解 路径）

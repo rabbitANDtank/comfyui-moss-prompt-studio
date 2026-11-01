@@ -14,7 +14,7 @@
  * inspector，rememberRun 来自 run_status，均为事件/异步时才调用）；widget 通过
  * getter 注入以保持 rebindWidgets 换绑后的实时引用。
  */
-import { parseSourceText, snapshotOf, serializeDraft, sourceSignature } from "./model.js";
+import { parseSourceText, snapshotOf, serializeDraft, sourceSignature, validateDraft } from "./model.js";
 import { editorFlushRegistry } from "./comfy-hooks.js";
 import { parseReverseRecord, reverseDecision, reverseRecord } from "./reverse.js";
 import { editsOwnerSignature, rebuildCandidates } from "./source_guard.js";
@@ -62,12 +62,17 @@ export function mountEditsSync(ctx) {
         if (opts.clear) {
           ctx.wEdits.value = "";
           if (ctx.wEdits.inputEl) ctx.wEdits.inputEl.value = "";
+          M.lastWrittenEdits = "";
           M.stateSrcSig = "";
           setSourceSig("");
         }
       } else {
         ctx.wEdits.value = serializeDraft(M.S);
         if (ctx.wEdits.inputEl) ctx.wEdits.inputEl.value = ctx.wEdits.value;
+        // 记录本插件最后一次写入的文本：flushEdits 用它区分「画布改动尚未落盘」
+        // 与「用户在文本框里输入了新内容」（审计：防抖窗口内 Queue 曾把滚轮/检查器
+        // 的手调框反向 adoption 回旧值，翻译节点因此拿到旧 JSON）
+        M.lastWrittenEdits = ctx.wEdits.value;
         // 只要画布内容来自当前 source（或手改后的 edits 被接管），都刷新归属签名。
         // 关键（P0-1）：M.S 可能是旧 source 的残留画布，此时必须沿用生成它的
         // source 签名（M.stateSrcSig），不能盖成 currentSourceSig()，否则后端会把
@@ -158,10 +163,18 @@ export function mountEditsSync(ctx) {
     try {
       // 用户刚手改过 edits：先接管；有效且 source 未变时保留用户原始文本，不重排覆盖。
       // 不只依赖 widget callback：Queue 前直接对比文本，callback 没触发也能兜住。
+      // 三态判别（审计修复）：widget 文本 = 本插件最后写入的文本 → 差异来自画布的
+      // 防抖窗口未落盘改动（滚轮缩放 500ms / 检查器 300ms），必须以画布为准写盘；
+      // 旧代码此时 adoptEdits 会拿旧 widget 文本反向接管，把手调结果静默回滚，
+      // 翻译节点因此一直拿到旧 JSON。
       const manualText = (ctx.wEdits.value || "").trim();
       const serialized = M.S ? serializeDraft(M.S).trim() : "";
-      const hadManual = M.editsDirty || (manualText && manualText !== serialized);
-      if (hadManual) {
+      const lastWritten = String(M.lastWrittenEdits || "").trim();
+      const canvasAhead = !!M.S && manualText && manualText !== serialized && manualText === lastWritten;
+      const hadManual = M.editsDirty || (manualText && manualText !== serialized && !canvasAhead);
+      if (canvasAhead) {
+        writeEdits();
+      } else if (hadManual) {
         // 手改 edits 解析失败 → 否决本次 Queue（返回 false），把错误拦在提交前，
         // 别等后端 sniff 报错中止整条队列（返回 false 会被 flushAll 当作否决）。
         if (!adoptEdits(false)) {
@@ -360,9 +373,56 @@ export function mountEditsSync(ctx) {
     return { ok: true };
   };
 
+  // ⤓提交：手动把当前画布冲进 edits 并做提交前体检——与 Queue 前自动 flush 同一条
+  // 代码路径（flushEdits），不是新的执行通道。自动链路修好后它并非必需步骤，价值在
+  // 显式可见：点一下就知道下次 Queue 会提交什么（元素数/尺寸/归属签名）。
+  function commitNow() {
+    if (M.submitting || M.splitBtn || M.poseBtn || M.costumeBtn) {
+      M.els.status.textContent = "拆解/注入任务在飞，等完成后再提交";
+      M.els.status.className = "mps-status err";
+      return false;
+    }
+    if (flushEdits() === false) return false; // 否决分支已写好错误状态行
+    ctx.rebindWidgets();
+    const sigOk = !ctx.wSrcSig || String(ctx.wSrcSig.value || "").trim() === currentSourceSig();
+    // 提交体检第二段：官方 schema 校验 + 文字容量/token 软提示（与检查器同一实现，
+    // statusWarnings 来自 inspector，经 fx 调用——单一代码路径，不复制逻辑）
+    let errs = [], warns = [];
+    try { if (M.S) errs = validateDraft(M.S); } catch (e) { /* 体检尽力而为 */ }
+    try { if (M.S) warns = fx.statusWarnings ? fx.statusWarnings() : []; } catch (e) { /* noop */ }
+    let checkTail = "";
+    if (errs.length) checkTail += ` · ⚠ 官方校验 ${errs.length} 个问题：${errs[0]}${errs.length > 1 ? " 等" : ""}`;
+    if (warns.length) checkTail += ` · ⚠ ${warns[0]}${warns.length > 1 ? `（另有 ${warns.length - 1} 条）` : ""}`;
+    if (M.S && !errs.length && !warns.length) checkTail += " · ✓ 校验与容量检查通过";
+    if (M.S && M.S.kind === "layout") {
+      const d = M.S.d;
+      const items = d.items || [];
+      const zh = { character: "角色", object: "物体", text: "文字" };
+      const kinds = {};
+      for (const it of items) kinds[it.label] = (kinds[it.label] || 0) + 1;
+      const parts = Object.entries(kinds).map(([k, v]) => `${zh[k] || k}×${v}`).join("、");
+      const gcap = String((d.summary && d.summary.caption) || "").trim().length;
+      const ok = sigOk && !errs.length;
+      fx.rememberRun(
+        `✅ 已提交当前画布：${items.length} 项（${parts || "空"}）· 全局描述 ${gcap} 字 · ${d.width}×${d.height}${checkTail}`
+        + (ok ? " · 下次 Queue 即用此稿"
+             : sigOk ? ""
+             : " · ⚠ 画布归属旧 source：后端将以 source 为准（翻译拿不到这份画布的原因）——请 ⚡拆解 重拆或修正 source"),
+        ok ? "ok" : "err");
+      return ok;
+    }
+    if (M.S && M.S.kind === "caption") {
+      fx.rememberRun(`✅ 已提交：caption 形态 · ${M.S.caption.length} 字 · 出图尺寸 ${+ctx.wCw.value || 1024}×${+ctx.wCh.value || 1024}（ai_draft 开启时 Queue 会自动拆解）${checkTail}`,
+        errs.length ? "err" : "ok");
+      return !errs.length;
+    }
+    fx.rememberRun(ctx.wEdits.value ? "⚠ 画布未接管：edits 内容解析失败，请检查 JSON（已保留原文）" : "已提交：当前无画布内容", M.S || ctx.wEdits.value ? "err" : "ok");
+    return false;
+  }
+
   return {
     snapshot, currentSig, currentSourceSig, syncWidgets, writeEdits, writeEditsSoon,
     showMsg, hideMsg, adoptEdits, setStateFromText, rebuildFromWidgets, rebuildFromEdits,
-    setWidgetInput, setAiDraft, bindEditsWidget, flushEdits, unregisterFlush,
+    setWidgetInput, setAiDraft, bindEditsWidget, flushEdits, unregisterFlush, commitNow,
   };
 }

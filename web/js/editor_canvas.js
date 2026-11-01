@@ -221,15 +221,15 @@ function init(node) {
   Object.assign(fx, { layoutCanvas, renderBoxes, renderLayers, bindField, buildPaletteEditor, setOptArr });
   const { pushUndo, commit, afterChange, afterLightChange, doUndo, doRedo, select, addItem, delItem, layerMove, occlude, applyCustomSize, applyResize } = mountItems(ctx);
   Object.assign(fx, { pushUndo, afterChange, afterLightChange, doUndo, doRedo, select, addItem, delItem, layerMove, occlude, applyCustomSize, applyResize });
-  const { renderAll, updateStatus, refreshSizeSelectors, updateToolbar, renderInspector } = mountInspector(ctx);
-  Object.assign(fx, { renderAll, updateStatus, refreshSizeSelectors, updateToolbar, renderInspector });
+  const { renderAll, updateStatus, refreshSizeSelectors, updateToolbar, renderInspector, statusWarnings } = mountInspector(ctx);
+  Object.assign(fx, { renderAll, updateStatus, refreshSizeSelectors, updateToolbar, renderInspector, statusWarnings });
 
   // ---------- 状态同步与 edits 写回协议 + 重建（已拆到 ./editor/edits_sync.js，行为不变） ----------
   const { snapshot, currentSig, currentSourceSig, syncWidgets, writeEdits, writeEditsSoon,
     showMsg, hideMsg, adoptEdits, rebuildFromWidgets, rebuildFromEdits, setWidgetInput,
-    bindEditsWidget, unregisterFlush } = mountEditsSync(ctx);
+    bindEditsWidget, unregisterFlush, commitNow } = mountEditsSync(ctx);
   // 跨块互调（供模板/姿势/注入/运行状态等模块经 fx 调用；注册先于任何事件/定时器触发）
-  Object.assign(fx, { currentSig, currentSourceSig, adoptEdits, rebuildFromEdits, setWidgetInput });
+  Object.assign(fx, { currentSig, currentSourceSig, adoptEdits, rebuildFromEdits, setWidgetInput, commitNow });
 
   // ---------- 手势 ----------
   function applyGesture(i, handle, orig, dx, dy) {

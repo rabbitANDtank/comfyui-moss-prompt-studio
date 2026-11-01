@@ -74,6 +74,13 @@ export function mountInjectFlows(ctx) {
     M.els.status.className = "mps-status";
     try {
       if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      // 手改文本还在 350ms 防抖窗口未采纳时先采纳（失败则中止注入），
+      // 否则下面的 writeEdits 会用画布旧文覆盖用户刚输入的内容（审计 P2-4）
+      if (M.editsDirty && !fx.adoptEdits(false)) {
+        M.els.status.textContent = "edits 解析失败，未注入——修正或清空 edits 后重试";
+        M.els.status.className = "mps-status err";
+        return;
+      }
       fx.writeEdits(); // 冲洗画布最新内容到 edits widget，提交的就是眼前这份
       const full = await app.graphToPrompt();
       const all = (full && (full.output || full)) || {};
@@ -193,6 +200,13 @@ export function mountInjectFlows(ctx) {
     M.els.status.className = "mps-status";
     try {
       if (typeof app.graphToPrompt !== "function") throw new Error("当前前端不支持 graphToPrompt");
+      // 手改文本还在 350ms 防抖窗口未采纳时先采纳（失败则中止注入），
+      // 否则下面的 writeEdits 会用画布旧文覆盖用户刚输入的内容（审计 P2-4）
+      if (M.editsDirty && !fx.adoptEdits(false)) {
+        M.els.status.textContent = "edits 解析失败，未注入——修正或清空 edits 后重试";
+        M.els.status.className = "mps-status err";
+        return;
+      }
       fx.writeEdits(); // 冲洗画布最新内容到 edits widget，提交的就是眼前这份
       const full = await app.graphToPrompt();
       const all = (full && (full.output || full)) || {};
