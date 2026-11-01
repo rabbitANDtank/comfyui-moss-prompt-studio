@@ -110,6 +110,10 @@ _PROVIDER_DEFAULT_BASE = {
     "minimax": "https://api.minimax.cn/v1",
 }
 
+# MiniMax 业务码：鉴权失败(1004)、参数/模型不存在(2013/2022)重试无意义，判永久；
+# 其余（限流 1002/1039、内部错误 1013 等）与 HTTP 429/5xx 同口径可重试。
+_MINIMAX_PERMANENT_CODES = {1004, 2013, 2022}
+
 
 def normalize_base_url(url: str) -> str:
     s = (url or "").strip()
@@ -123,6 +127,10 @@ def normalize_base_url(url: str) -> str:
     try:
         port = p.port
     except ValueError:
+        port = None
+    # scheme 默认端口（https:443 / http:80）不参与归一：用户从浏览器地址栏复制的
+    # 显式 :443 与省略写法必须视为同一地址，否则 config key 安全回退会被误拒。
+    if port and port == {"https": 443, "http": 80}.get(p.scheme.lower()):
         port = None
     netloc = host + (f":{port}" if port else "")
     return urllib.parse.urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), "", ""))
@@ -304,16 +312,21 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
         raise TranslationError(
             f"请求超时 [{safe_url}]（>{timeout}s），可在 timeout widget 调大"
         ) from e
-    # MiniMax 原生/兼容端点可能 HTTP 200 + base_resp.status_code 报业务错误
+    # MiniMax 原生/兼容端点可能 HTTP 200 + base_resp.status_code 报业务错误。
+    # 只有鉴权/参数/模型不存在类才判永久；限流类业务码（1002/1039 等）与
+    # HTTP 429 同口径可重试，否则一次限流就整节点失败、3 次重试全跳过。
     if isinstance(payload, dict) and isinstance(payload.get("base_resp"), dict):
         br = payload["base_resp"]
         code = br.get("status_code")
         if code not in (0, None):
             print(f"{prefix} {time.perf_counter() - t0:.2f}s host={host} "
                   f"model={body.get('model')} 业务错误 {code}", flush=True)
-            raise PermanentError(sanitize_secret(
+            err = sanitize_secret(
                 f"MiniMax 业务错误 {code}: {str(br.get('status_msg') or '').strip()}", key
-            ))
+            )
+            if code in _MINIMAX_PERMANENT_CODES:
+                raise PermanentError(err)
+            raise TranslationError(err)
     try:
         msg = payload["choices"][0]["message"]
         content = msg.get("content") or ""
@@ -340,6 +353,13 @@ def chat(base_url: str, api_key: str, body: dict, timeout: int, tag: str = "") -
         raise TranslationError(sanitize_secret(
             f"输出被 max_tokens 截断（finish_reason=length），末尾 60 字: …{content[-60:]}", key
         ))
+    # content_filter / 网关截断等异常结束与 length 同口径报错交给重试，绝不静默放行。
+    # end_turn/eos/stop_sequence 是 Anthropic 兼容网关与 vLLM 系的合法 stop 变体，
+    # custom provider 常见——白名单放行，其余一律报错。
+    if finish not in (None, "stop", "end_turn", "eos", "stop_sequence"):
+        raise TranslationError(sanitize_secret(
+            f"输出异常结束（finish_reason={finish}），末尾 60 字: …{content[-60:]}", key
+        ))
     return content
 
 
@@ -351,8 +371,11 @@ def _repair_json_text(s: str) -> str:
        说明字符串在此处并没有真的结束，把该引号转义后留在字符串内。
     2. 输出提前收笔，结尾缺 ] / }。按括号栈补齐。
 
-    修复结果仍要过 strict_loads 与后续结构校验（bbox/text 逐字比对），
-    所以修错只会解析失败，不会悄悄污染翻译结果。
+    字符串在输入末尾仍未闭合 = 输出中途截断（内容过滤/网关截断）：直接抛
+    TranslationError 交给重试，绝不补引号静默成合法 JSON——那会把半句话变成
+    "完整"字段，caption 产出半截英文、items 静默缺项。
+
+    修复结果仍要过 strict_loads 与后续结构校验（bbox/text 逐字比对）。
     """
     out = []
     stack = []
@@ -394,7 +417,7 @@ def _repair_json_text(s: str) -> str:
             out.append(c)
         i += 1
     if in_str:
-        out.append('"')
+        raise TranslationError("输出在字符串中途截断（疑似内容过滤/网关截断），不做静默补全")
     while stack:
         out.append("]" if stack.pop() == "[" else "}")
     return "".join(out)
@@ -435,7 +458,11 @@ def extract_json(text: str):
         candidates.append(t[t.index("{"):])
 
     for cand in candidates:
-        rep = _repair_json_text(cand)
+        try:
+            rep = _repair_json_text(cand)
+        except TranslationError as e:
+            best_err = e  # 字符串中途截断：不修复，记入错误交给上层重试
+            continue
         if rep != cand:
             try:
                 return _try(rep)

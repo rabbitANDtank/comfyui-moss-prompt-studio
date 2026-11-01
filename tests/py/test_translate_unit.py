@@ -191,3 +191,14 @@ def test_token_stream_semantics():
     assert resolve_reverse_options("standard", provider="custom")["max_tokens"] == 16384
     assert resolve_reverse_options("detailed", provider="custom")["max_tokens"] == 16384
     assert resolve_reverse_options("manual", provider="custom", max_tokens=32768)["max_tokens"] == 32768
+
+
+def test_extract_json_truncated_string_raises():
+    """字符串中途截断曾被静默补全成合法 JSON（半句话变"完整"字段，caption 产出
+    半截英文），修复后必须报错交给重试，绝不静默放行（审计 P0-2）。"""
+    bad = '{"summary":{"caption":"a sunset over the wate'
+    _expect(TranslationError, extract_json, bad)
+    _expect(TranslationError, extract_json, '{"items":[{"caption":"写字途中截')
+    # 未转义引号 + 截断收尾括号的正常修复路径不受影响
+    out = extract_json('{"summary":{"caption":"a 20" pipe"')
+    assert out["summary"]["caption"] == 'a 20" pipe'

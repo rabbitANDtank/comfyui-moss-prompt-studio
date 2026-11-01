@@ -119,6 +119,13 @@ export function mountEditsSync(ctx) {
       return false;
     }
     if (M.S && JSON.stringify(next) === JSON.stringify(M.S)) return true;
+    // 换源保护：画布归属的还是旧 source 时，采纳不得把旧画布冒充新 source 的当前
+    // 画布——否则后端 resolve_editor_text 按假签名弃用新散文、轮询因 builtSig 被刷
+    // 新而永不自愈（审计 P1：签名体系被 Queue 通道的手改采纳绕过）。
+    if (M.stateSrcSig && M.stateSrcSig !== currentSourceSig()) {
+      if (showErrors) showMsg("source 已变化：这份 edits 属于旧 source，未接管（以 source 为准；要保留画布请先 ⟲重置 再粘贴）", true);
+      return false;
+    }
     const pre = M.S ? snapshot() : null;
     M.S = next;
     M.stateSrcSig = currentSourceSig();
@@ -155,8 +162,14 @@ export function mountEditsSync(ctx) {
       const serialized = M.S ? serializeDraft(M.S).trim() : "";
       const hadManual = M.editsDirty || (manualText && manualText !== serialized);
       if (hadManual) {
-        adoptEdits(false);
-        if (currentSig() === M.builtSig) return;
+        // 手改 edits 解析失败 → 否决本次 Queue（返回 false），把错误拦在提交前，
+        // 别等后端 sniff 报错中止整条队列（返回 false 会被 flushAll 当作否决）。
+        if (!adoptEdits(false)) {
+          M.els.status.textContent = "edits 画布 JSON 解析失败，未提交——修正或清空 edits 后再 Queue";
+          M.els.status.className = "mps-status err";
+          return false;
+        }
+        if (currentSig() === M.builtSig) return true;
       }
       // source 改了但还没被 700ms 轮询接管 → 提交前同步重建，避免 Queue 用旧 edits
       if (currentSig() !== M.builtSig) {
@@ -212,6 +225,19 @@ export function mountEditsSync(ctx) {
     clearTimeout(M.editsCb);
     const src = (ctx.wSource.value || "").trim();
     let edits = (ctx.wEdits.value || "").trim();
+    // 仅宽高变化且画布已是 layout：不重建。B2 后草稿尺寸优先，重建只会把布局打回
+    // caption 视图、覆盖 edits（widget 数字框与工具栏等价，极易误触=整份布局静默丢失）。
+    // sig 含宽高而 source 签名未变 ⇒ 差异只在宽高。source 变化 / ⟲重置 不受影响。
+    if (!clearEditsOnEmpty && M.S && M.S.kind === "layout" && M.stateSrcSig
+        && M.stateSrcSig === currentSourceSig() && currentSig() !== M.builtSig) {
+      showMsg("画布保持草稿尺寸：改尺寸请用工具栏比例/像素选择器（等比缩放所有框），或 ⚡拆解 重拆", false);
+      M.builtSig = M.pendSig = currentSig();
+      fx.updateToolbar();
+      return;
+    }
+    // 失败回滚快照：候选全部解析失败时恢复画布与撤销栈，绝不静默清空用户数据
+    // （⟲重置 的显式清空走 clearEditsOnEmpty 分支，不受影响）。
+    const pre = { S: M.S, sel: M.sel, undo: M.undo, redo: M.redo, srcSig: M.stateSrcSig };
     M.S = null; M.sel = null; M.undo = []; M.redo = [];
     hideMsg();
 
@@ -253,15 +279,14 @@ export function mountEditsSync(ctx) {
       }
     }
 
-    // 解析失败：保留原 edits，不写空，避免把已保存的布局冲掉。
-    // 只有旧 edits 已明确不属于当前 source、且没有任何候选可接管时，才按原行为
-    // 清掉，避免它继续遮住 source（F8：清空动作必须在候选解析失败之后）。
-    if (!editsValid && edits && src && !preferEdits) {
-      ctx.wEdits.value = "";
-      if (ctx.wEdits.inputEl) ctx.wEdits.inputEl.value = "";
-      setSourceSig("");
+    // 解析失败：恢复进函数前的画布/撤销栈（edits widget 原文不动），只提示错误。
+    // 旧画布归属不同 source 时后端 resolve_editor_text 仍以 source 为准，不存在
+    // 旧画布遮蔽新 source；用户修正 source 后下一次轮询会自动接管（builtSig 未
+    // 被伪装成匹配）。editText/签名都不清空——清空等于不可恢复的数据丢失。
+    if (!clearEditsOnEmpty) {
+      M.S = pre.S; M.sel = pre.sel; M.undo = pre.undo; M.redo = pre.redo; M.stateSrcSig = pre.srcSig;
     }
-    showMsg(String((lastErr && lastErr.message) || lastErr || "无法解析"), true);
+    showMsg("内容解析失败" + (pre.S ? "（已保留原画布与撤销栈）" : "") + ": " + String((lastErr && lastErr.message) || lastErr || "无法解析"), true);
     M.builtSig = M.pendSig = currentSig();
     fx.renderAll(); fx.updateToolbar();
   }

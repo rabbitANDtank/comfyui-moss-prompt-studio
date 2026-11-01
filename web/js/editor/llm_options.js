@@ -361,7 +361,13 @@ export function mountLlmOptions(node) {
       if (!w) continue;
       if (w.hidden) continue; // 已隐藏就不重复写，避免每秒触发一次重排
       try { w.hidden = true; } catch (e) {
-        try { w.visibility.suppression.byExtension = true; } catch (e2) { /* noop */ }
+        try { w.visibility.suppression.byExtension = true; } catch (e2) {
+          // 两条隐藏路径都失败：不静默——画布上会出现重复选项行，用户需要知道为什么
+          if (!node._mpsHideWarned) {
+            node._mpsHideWarned = true;
+            console.warn("[MOSS Studio] 无法隐藏原 LLM 选项 widget（前端结构变化？），画布可能出现重复选项行");
+          }
+        }
       }
     }
   };

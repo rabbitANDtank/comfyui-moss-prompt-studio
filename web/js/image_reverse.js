@@ -399,10 +399,14 @@ function initNode(node) {
           node._mpsLastImage = imgVal;
         } else if (imgVal !== node._mpsLastImage) {
           node._mpsLastImage = imgVal;
-          const wEn = findWidget(node, "enabled");
+          // 只在真的接了 Editor.reverse_in 时自动开启并提示：未接线时 syncEnabledFromLinks
+          // 每 tick 强制关，这里若置 true 会立刻被翻回且提示成假消息。
+          // setWidgetValue 同步勾选框 inputEl，别直接改 wEn.value（UI 不亮）。
+          let hasTarget = false;
+          try { hasTarget = findTargets(node).some((t) => t.inputName === "reverse_in"); } catch (e) { /* 图未就绪 */ }
+          const wEn = hasTarget ? findWidget(node, "enabled") : null;
           if (wEn && !wEn.value) {
-            wEn.value = true;
-            if (wEn.callback) wEn.callback(true);
+            setWidgetValue(node, "enabled", true);
             setReverseStatus(node, "🖼 检测到更换图片：反推已自动开启", "ok");
           }
         }

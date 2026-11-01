@@ -188,3 +188,10 @@ test("normalizeIntWidget 修复旧工作流错位的 INT 值", () => {
   assert.equal(normalizeIntWidget(99999), 1024, "高于 max 回默认");
   assert.equal(normalizeIntWidget("", { def: 0, min: 0, max: 100 }), 0, "自定义默认");
 });
+
+// 前后端 FNV-1a 黄金值对拍：py 侧同值断言在 tests/py/test_contract_sync.py。
+// 任一侧算法漂移（改哈希/改编码/改格式化）两侧都会红（审查 P1-13）。
+test("sourceSignature 与后端 source_signature 黄金值一致", () => {
+  assert.equal(sourceSignature("MOSS测试abc123"), "fnv1a:26c84941");
+  assert.equal(sourceSignature(""), "fnv1a:811c9dc5", "空串 = FNV offset basis");
+});

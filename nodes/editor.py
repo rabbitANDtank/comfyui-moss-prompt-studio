@@ -22,7 +22,6 @@ try:
         apply_pose_to_draft,
         load_agent_md,
         load_config,
-        _repair_ai_draft,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
@@ -42,7 +41,6 @@ except ImportError:  # 兼容非包方式导入
         apply_pose_to_draft,
         load_agent_md,
         load_config,
-        _repair_ai_draft,
         prose_to_layout,
         resolve_api_key,
         resolve_editor_text,
@@ -258,8 +256,10 @@ class MOSSEditor:
         # caption，注入后过官方 validate_draft 再经 ui.mps_draft 写回（与拆解同一条
         # 写回通道）。apply_*= -1 不注入；-2 自动分配；>=0 只注入该下标角色。
         # 两者可同时生效（先姿势后服装），由前端按钮分别提交。
-        pose_apply = isinstance(apply_pose, int) and apply_pose != -1
-        costume_apply = isinstance(apply_costume, int) and apply_costume != -1
+        # bool 是 int 子类：外部 API 传 JSON true 会命中 isinstance(int) 且 True>=0，
+        # 被当成 items[1] 注入目标——显式排除，回落为不注入
+        pose_apply = isinstance(apply_pose, int) and not isinstance(apply_pose, bool) and apply_pose != -1
+        costume_apply = isinstance(apply_costume, int) and not isinstance(apply_costume, bool) and apply_costume != -1
         if pose_apply or costume_apply:
             if info["kind"] != "layout":
                 what = "姿势/服装" if pose_apply and costume_apply else ("姿势" if pose_apply else "服装")
@@ -304,22 +304,11 @@ class MOSSEditor:
             # 与 resolve_editor_text / 前端 currentSourceSig 一致：按 strip 后的 source 签名
             ui["mps_src_sig"] = source_signature((source or "").strip())
 
-        # layout 画布尺寸遵循 Editor 的 canvas_width/canvas_height（工具栏比例/像素选择器）：
-        # 反推/外部带入的 draft 尺寸与此不同时，按目标画布等比重缩放（bbox 同步缩放），
-        # 保证出图尺寸与绿框设定一致（v1.9.0-beta0 用户确认的语义；审查前的行为是 draft 优先）。
-        if info["kind"] == "layout":
-            tw, th = int(canvas_width or 0), int(canvas_height or 0)
-            if tw > 0 and th > 0:
-                tw, th = snap16(tw), snap16(th)
-                if (tw, th) != (int(info["draft"]["width"]), int(info["draft"]["height"])):
-                    draft = _repair_ai_draft(info["draft"], tw, th)
-                    info = {"kind": "layout", "draft": draft}
-                    if "mps_draft" in ui:
-                        ui["mps_draft"] = json.dumps(draft, ensure_ascii=False, indent=2)
-
         out = json.dumps(info["draft"], ensure_ascii=False, indent=2)
         # 与草稿同源的宽高：layout 用草稿尺寸；caption 用本节点 canvas_width/height，
         # 接给 Compiler 的 canvas_width/height 输入即可保证生图尺寸与画布一致。
+        # 草稿尺寸优先（与 v1.8.x 一致）：想改尺寸用工具栏比例/像素选择器，前端会弹
+        # 确认并等比缩放所有框后写回 edits；后端不做自动重缩放（勿把按 canvas 重缩放加回来）。
         if info["kind"] == "layout":
             out_w, out_h = int(info["draft"]["width"]), int(info["draft"]["height"])
         else:
@@ -351,5 +340,8 @@ def _save_underlay(images, unique_id=None):
         name = f"moss_underlay_{unique_id or int(time.time() * 1000)}.png"  # 每节点固定名覆盖写，temp 不随连跑增长
         img.save(os.path.join(folder_paths.get_temp_directory(), name))
         return {"filename": name, "subfolder": "", "type": "temp"}
-    except Exception:
+    except Exception as e:
+        # 吞错可以（底图不阻塞节点），但不能零日志——09570ef 的 NameError 就是
+        # 在这里被静默吞掉、底图永远不上屏排查不到
+        print(f"[MOSS Studio] underlay 底图保存失败（不阻塞节点）: {e}", flush=True)
         return None

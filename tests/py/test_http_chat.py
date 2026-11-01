@@ -321,3 +321,81 @@ def test_chat_response_body_is_capped():
         assert MockHandler.hits == 1, "不得因超大 body 重试读取"
     finally:
         srv.shutdown()
+
+
+def test_normalize_base_url_default_port():
+    """显式 :443/:80 与省略写法必须归一为同一地址，否则 config key 安全回退被误拒（审计 P1-7）。"""
+    from py.llm_client import normalize_base_url
+    assert normalize_base_url("https://api.example.cn/v1") == normalize_base_url("https://api.example.cn:443/v1")
+    assert normalize_base_url("http://h/x/") == normalize_base_url("http://h:80/x")
+    assert normalize_base_url("HTTPS://H:443/v1/") == normalize_base_url("https://h/v1")  # scheme/host 归一小写，path 保持原样
+    # 非默认端口必须保留（不同地址）
+    assert normalize_base_url("https://h:8443/v1") != normalize_base_url("https://h/v1")
+    assert normalize_base_url("") == ""
+
+
+def test_minimax_rate_limit_business_error_is_retryable():
+    """限流类业务码（1002）与 HTTP 429 同口径可重试；只有鉴权/模型不存在判永久（审计 P1-6）。"""
+    from py.llm_client import _MINIMAX_PERMANENT_CODES
+
+    class RateLimitHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))  # 读掉请求体防 10053
+            payload = {"base_resp": {"status_code": 1002, "status_msg": "rate limited"},
+                       "choices": []}
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    assert 1004 in _MINIMAX_PERMANENT_CODES and 2022 in _MINIMAX_PERMANENT_CODES
+    assert 1002 not in _MINIMAX_PERMANENT_CODES and 1039 not in _MINIMAX_PERMANENT_CODES
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RateLimitHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _expect(TranslationError, chat,
+                f"http://127.0.0.1:{srv.server_address[1]}/v1", "k",
+                {"model": "MiniMax-M3.1-Flash"}, 5)
+    finally:
+        srv.shutdown()
+
+
+def test_chat_finish_reason_variants():
+    """stop 合法变体（end_turn/eos/stop_sequence，custom provider 常见）放行；
+    content_filter 等异常结束仍报错重试（审计 P2）。"""
+    from py.llm_client import chat as _chat  # noqa: F401  已在顶部导入
+
+    class FinishHandler(http.server.BaseHTTPRequestHandler):
+        finish = "end_turn"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            payload = {"choices": [{"message": {"content": "hello world"},
+                                    "finish_reason": self.finish}],
+                       "usage": {"completion_tokens": 5}}
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FinishHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        for ok in ("end_turn", "eos", "stop_sequence", "stop", None):
+            FinishHandler.finish = ok
+            assert chat(url, "k", {"model": "m"}, 5) == "hello world", f"finish={ok!r} 应放行"
+        FinishHandler.finish = "content_filter"
+        _expect(TranslationError, chat, url, "k", {"model": "m"}, 5)
+    finally:
+        srv.shutdown()

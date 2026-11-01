@@ -7,14 +7,16 @@ def _forgive_llm_sloppiness(obj):
     """仅用于 AI 拆解产物：宽容 LLM 常见手误。
 
     - meta/tags/palette 被写成单个字符串 → 按逗号拆成数组（中英文逗号都认）
-    - 数组元素过滤空白；归一后为空则删掉该可选字段（官方要求非空数组）
+    - 数组元素只保留非空字符串：dict/数字元素直接丢弃，绝不 str() 塞进去
+      （"{'a': 1}" 这类垃圾会绕过字符串校验混进最终编译 prompt）
+    - 归一后为空则删掉该可选字段（官方要求非空数组）
     """
     def coerce(container, key):
         v = container.get(key)
         if isinstance(v, str):
             parts = [x.strip() for x in v.replace("，", ",").split(",") if x.strip()] if v.strip() else []
         elif isinstance(v, list):
-            parts = [str(x).strip() for x in v if str(x).strip()]
+            parts = [x.strip() for x in v if isinstance(x, str) and x.strip()]
         else:
             return
         if parts:
@@ -37,9 +39,16 @@ def _forgive_llm_sloppiness(obj):
     return obj
 
 
-_AI_TOP_KEYS = {"width", "height", "bbox_coord_space", "bbox_format", "summary", "items"}
-_AI_SUMMARY_KEYS = {"caption", "meta", "canvas", "palette"}
-_AI_ITEM_KEYS = {"label", "caption", "bbox", "text", "tags", "palette"}
+# 官方草稿契约字段集：单一来源是 compile_prompt（validate_draft 校验用同一份），
+# 这里按旧私有名引用，别再手抄第二份。
+try:
+    from .compile_prompt import ITEM_KEYS as _AI_ITEM_KEYS
+    from .compile_prompt import SUMMARY_KEYS as _AI_SUMMARY_KEYS
+    from .compile_prompt import TOP_KEYS as _AI_TOP_KEYS
+except ImportError:  # 兼容非包方式导入
+    from compile_prompt import ITEM_KEYS as _AI_ITEM_KEYS
+    from compile_prompt import SUMMARY_KEYS as _AI_SUMMARY_KEYS
+    from compile_prompt import TOP_KEYS as _AI_TOP_KEYS
 
 
 def _as_num(v):

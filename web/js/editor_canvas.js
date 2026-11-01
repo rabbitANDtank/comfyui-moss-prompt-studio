@@ -72,11 +72,24 @@ function init(node) {
   // graphToPrompt 仍按 widget 值提交，有连线时连线值优先，取值语义不变。
   // 序列化/configure 会重建绑定，故挂在每次 rebindWidgets（幂等）里。
   function exposeReferenceSockets() {
+    let sawBinding = false;
     for (const nm of ["pose_in", "pose_in_2", "costume_in", "costume_in_2"]) {
       const inp = (node.inputs || []).find((i) => i && i.name === nm);
       if (!inp || !inp.widget) continue;
+      sawBinding = true;
       inp.widget = null;
       if ("_widgetRef" in inp) inp._widgetRef = null;
+    }
+    if (sawBinding) { node._mpsSawRefBinding = true; return; }
+    // 降级提示：后端有这四个 input 但前端从未出现预期的 widget 绑定结构——
+    // ComfyUI 前端升级改掉内部结构时输入口会再次静默消失（issue #1 复发路径）。
+    // rebindWidgets 每 700ms 跑一次，连续 ~7s 未见绑定才报，避开 configure 时序抖动。
+    const hasInputs = (node.inputs || []).some((i) => i && ["pose_in", "pose_in_2", "costume_in", "costume_in_2"].includes(i.name));
+    if (hasInputs && !node._mpsSawRefBinding) {
+      node._mpsRefMiss = (node._mpsRefMiss || 0) + 1;
+      if (node._mpsRefMiss === 10) {
+        console.warn("[MOSS Studio] 未发现姿势/服装输入的 widget 绑定结构：左侧输入口可能不渲染（ComfyUI 前端结构变化？）。如输入口消失，请勿手改本 hack，到仓库 issue #1 反馈版本号");
+      }
     }
   }
   // 旧工作流缓存的姿势/服装 widget 可能是 ""/null（widgets_values 错位或新控件缺省）：

@@ -19,10 +19,26 @@ import json
 import re
 
 try:
-    from .compile_prompt import DraftError, VALID_CANVAS, VALID_LABELS, validate_draft
+    from .compile_prompt import (
+        ITEM_KEYS,
+        SUMMARY_KEYS,
+        TOP_KEYS,
+        DraftError,
+        VALID_CANVAS,
+        VALID_LABELS,
+        validate_draft,
+    )
     from .sniff import strict_loads
 except ImportError:  # 兼容非包方式导入
-    from compile_prompt import DraftError, VALID_CANVAS, VALID_LABELS, validate_draft
+    from compile_prompt import (
+        ITEM_KEYS,
+        SUMMARY_KEYS,
+        TOP_KEYS,
+        DraftError,
+        VALID_CANVAS,
+        VALID_LABELS,
+        validate_draft,
+    )
     from sniff import strict_loads
 
 # ---------- 拆分后子模块统一 import：主流程依赖 + 门面 re-export（零行为变化）----------
@@ -215,11 +231,6 @@ Hard rules:
 - Translation style: concrete and visually descriptive image-prompt English; keep photography/art terminology accurate.
 
 Output: the translated JSON object only, as raw JSON text."""
-
-
-TOP_KEYS = ["width", "height", "bbox_coord_space", "bbox_format", "summary", "items"]
-SUMMARY_KEYS = {"caption", "meta", "canvas", "palette"}
-ITEM_KEYS = {"label", "caption", "bbox", "text", "tags", "palette"}
 
 
 _HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")

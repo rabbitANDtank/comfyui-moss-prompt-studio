@@ -1,8 +1,8 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-当前版本：**v1.9.0**
+当前版本：**v1.9.1**
 
-> **本次更新（v1.9.0）**：反推三输出自动写回画布联动拆解，换图自动启用反推；修复姿势/服装输入口缺失与注入卡死；架构模块化重构（详见「版本与更新」）。
+> **本次更新（v1.9.1）**：审计修复批次——粘贴坏 JSON 不再清空画布与撤销栈、LLM 截断改报错不再静默出半截稿、layout 出图尺寸回归草稿优先（v1.8.x 一致）、换图自动启用反推仅在已接 reverse_in 时生效；另修 MiniMax 重试口径 / base_url 端口归一 / snap16 舍入等（详见「版本与更新」）。
 
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接原生 MOSS-Image 节点生图。
 
@@ -172,14 +172,15 @@ custom_nodes/comfyui-moss-prompt-studio/
 
 ```bash
 python tests/run_tests.py     # 106 用例
-node --test tests/*.test.mjs  # 130 用例（glob 自动包含所有前端测试）
+node --test tests/*.test.mjs  # 131 用例（glob 自动包含所有前端测试）
 ```
 
 覆盖编译/识别/翻译/反推/连接测试/姿势注入/服装注入，以及前端纯逻辑、生命周期、写回和模式预设。控制台会打印 `[MOSS Studio] LLM ...` 日志，可用于排查耗时、重试和截断。真实 LLM 的姿势注入对照实验：`python tests/bench_ai_draft.py --variants pose_solo,pose_dual,pose_pair`（需 config.json）。
 
 ## 版本与更新
 
-- **v1.9.0**：反推三输出（散文/草稿/画布）接入 `reverse_in` 后自动写回画布并联动拆解，**更换上传图片自动启用反推**；**恢复 `pose_in`/`costume_in` 的左侧输入口**（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)），可直接连线 Costume/Pose Gallery；修复注入结果卡死（队列空自愈 + 超时兜底随 LLM timeout 放宽）与翻译顶层 meta 容错；后端/前端/测试按职责模块化重构，行为兼容 v1.8.x。服装注入不再误删画面文字条目；layout 画布尺寸遵循工具栏比例/像素设定。Python **106** / Node **130**。
+- **v1.9.1**：审计修复批次（四维审计深挖后的集中落地）。**数据安全**：粘贴非法 source 不再清空画布与撤销栈（保留原画布并提示冲突）；Queue 前手改 edits 解析失败直接否决提交并提示，不再等后端报错中止整条队列；LLM 输出中途截断（content_filter/网关截断，`finish_reason` 异常）改为报错重试，绝不静默补全成半截稿。**行为回归**：layout 出图尺寸恢复跟草稿走（与 v1.8.x 一致；改尺寸用工具栏比例/像素选择器，前端确认后等比缩放所有框）。**交互**：换图自动启用反推仅在已接 `reverse_in` 时生效并同步勾选框 UI（未接线不再弹假提示）；注入/服装/提交在飞时改 source 不再重置画布、丢弃结果。**健壮性**：MiniMax 限流类业务码可重试（仅鉴权/参数/模型不存在判永久）；base_url 显式 `:443`/`:80` 与省略写法归一（config key 安全回退不再误拒）；`snap16` .5 边界恒定向上取近；tags/palette 数组只收非空字符串（垃圾元素不再混进编译 prompt）；底图保存失败输出日志不再静默。**链路审计补漏**：直接在 widget 数字框改画布尺寸不再把已拆解布局静默打回散文（守卫提示改用工具栏选择器或 ⚡拆解）；换 source 后 700ms 内的手改 edits 不再被错误归属到新 source（拒绝接管并提示，防旧画布冒充新稿）；手改 JSON 删掉 `summary` 不再崩掉检查器；`finish_reason` 的 `end_turn`/`eos`/`stop_sequence` 合法变体放行（custom provider 常见）；外部 API 传 bool 的 `apply_pose/costume` 回落为不注入。**可维护性**：官方字段集归一 `compile_prompt` 单一来源；新增前后端常量对拍测试与 FNV 黄金值（marker/反推预设/词表任一侧漂移即红）；两处 ComfyUI 前端内部结构 hack 加降级提示（issue #1 复发路径可感知）。Python **120** / Node **131**。
+- **v1.9.0**：反推三输出（散文/草稿/画布）接入 `reverse_in` 后自动写回（prose/draft 写入 source、canvas 写入 edits，写回后需手动 ⚡拆解），**更换上传图片自动启用反推**（仅在已接 reverse_in 时生效并同步勾选框）；**恢复 `pose_in`/`costume_in` 的左侧输入口**（[issue #1](https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues/1)），可直接连线 Costume/Pose Gallery；修复注入结果卡死（队列空自愈 + 超时兜底随 LLM timeout 放宽）与翻译顶层 meta 容错；后端/前端/测试按职责模块化重构，行为兼容 v1.8.x。服装注入不再误删画面文字条目；layout 出图尺寸跟草稿走（与 v1.8.x 一致），改尺寸用工具栏比例/像素选择器（前端确认后等比缩放所有框并写回画布）。Python **106** / Node **130**。
 
 - **v1.9.0-beta0**：纯架构重构版，**用户可见行为零变化**（节点名/输入输出/工作流兼容性不变）。`py/translate.py`（1402 行）拆为 llm_client/agent_md/caption_segments/inject_pose/inject_costume/draft_repair 六个职责模块，原文件保留为门面 re-export；`web/js/editor_canvas.js`（2705 行）拆为 11 个 `editor/` 模块（styles/dom_shell/canvas_render/items/inspector/edits_sync/template_panel/pose_panel/inject_flows/run_status/translator_panel），主文件仅剩组装骨架（441 行）；`tests/run_tests.py`（3237 行）拆为 `tests/py/` 11 个用例文件 + 自动收集 runner（新增测试不再需要注册列表）。拆分经逐字节一致校验与行为冒烟轨迹对比验证；Python **102** / Node **128** 与拆分前完全一致。测试 runner 勿并发运行（见文件头注释）。
 - **v1.8.0**：新增可选服装注入（comfyui-costume-gallery `description → costume_in(_2)`、`costume_mode`、📥服装、🔄 对调两人服装）；caption 改为通用分段解析，姿势/服装/遮挡后缀可共存且互不删除；修复连续快速注入的结果误判（submit token）与反推草稿旧服装 object 残留；新增敏感分类/旧服装混合提示；⚡拆解 改为主色大按钮；Editor/Translator 画布宽高控件类型归一（旧工作流错位导致的「运行成功但不出图」）。Python **102** / Node **128**。

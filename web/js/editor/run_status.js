@@ -332,10 +332,13 @@ export function mountRunStatus(ctx) {
     ctx.rebindWidgets();
     try { warnApiKeyIfSet(node, fx.showKeyWarn); } catch (e) { /* noop */ }
     try { fx.applyWidthPin(); } catch (e) { /* noop */ }
+    // 拆解/注入/提交任一在飞都不得重建画布：此时改 source 会让画布瞬间重置回
+    // caption 视图、清撤销栈，且在飞结果会因签名失配被丢弃（审查 P1-11）。
+    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
     const sig = fx.currentSig();
     if (sig === M.pendSig) {
       // source 改变时以 source 为准；edits 只作为 source 为空/加载恢复时的回退
-      if (sig !== M.builtSig && !M.splitBtn) { fx.rebuildFromWidgets({ preferEdits: false }); }
+      if (sig !== M.builtSig && !hasPending) { fx.rebuildFromWidgets({ preferEdits: false }); }
     } else {
       M.pendSig = sig;
     }
@@ -344,7 +347,6 @@ export function mountRunStatus(ctx) {
     // 只看按钮引用会永久漏掉——任何 submitting 挂起都必须能被兜底复位（失效时立即解锁）。
     // 兜底时长取 max(180s, 节点 timeout+30s)：用户可设 timeout 至 1200s，慢 LLM/排队
     // 不应被 180s 硬兜底误判超时而复位并诱发重复提交（审查 P2-3）。
-    const hasPending = !!(M.splitBtn || M.poseBtn || M.costumeBtn || M.submitting);
     const timeoutW = node.widgets && node.widgets.find((x) => x.name === "timeout");
     if (shouldResetOnTimeout({ hasPending, elapsedMs: Date.now() - (M.splitAt || 0), timeoutMs: fallbackTimeoutMs(timeoutW && timeoutW.value) })) {
       fx.resetSplitBtn();

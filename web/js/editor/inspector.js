@@ -39,7 +39,10 @@ export function mountInspector(ctx) {
       return;
     }
 
-    const d = M.S.d, s = d.summary;
+    // 手改 edits 可能删掉 summary（parseSourceText 对 draft 形态零校验直接接管）：
+    // 兜底空对象，让缺失字段的错误正常走到 validateDraft/状态行，而不是在这里
+    // 崩掉检查器、冻结整个渲染链（审计 P1）
+    const d = M.S.d, s = d.summary || (d.summary = {});
     const h5 = (t) => { const e = document.createElement("div"); e.style.cssText = "color:#8f8f8f;font-size:11px;margin:5px 0 2px;"; e.textContent = t; return e; };
 
     insp.appendChild(h5("summary"));
