@@ -1,0 +1,17 @@
+[project]
+name = "moss-prompt-studio"
+description = "Chinese end-to-end MOSS-Image prompt studio for ComfyUI: canvas draft editing, LLM translation, official compile, and image reverse."
+version = "1.10.0-beta3"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+classifiers = ["Operating System :: OS Independent"]
+
+[project.urls]
+Repository = "https://github.com/rabbitANDtank/comfyui-moss-prompt-studio"
+"Bug Tracker" = "https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues"
+
+[tool.comfy]
+PublisherId = "rabbitANDtank"
+DisplayName = "MOSS Prompt Studio"
+requires-comfyui = ">=0.43.0"
