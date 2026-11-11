@@ -1,8 +1,8 @@
 # MOSS Prompt Studio（ComfyUI 插件）
 
-当前版本：**v1.10.0-beta2**
+当前版本：**v1.10.0-beta3**
 
-> **本次更新（v1.10.0-beta2）**：在 v1.10.0-beta（AI 定向改稿）基础上新增**多格分镜**：模板一键建格，一句话逐格填内容——检查器新增 canvas 画布模式下拉（`multi_panel`），📐模板 新增「条漫 1×3 / 角色三视图 / 四格分镜」；⤢改稿 在多格草稿上照常工作、可批量填格；⚡拆解/⚡反推 回退提示；多格下 📥姿势/📥服装 自动分配禁用（选中注入与「🔄 对调」不受影响）。另修复：改稿 LLM 偶发漏 reason 字段导致空提案卡（自动补全，不再拒收）。用法见「Editor 使用要点 · 多格分镜」，AI 定向改稿见「可选功能」。
+> **本次更新（v1.10.0-beta3）**：仅 Comfy Registry 打包，节点行为与 **v1.10.0-beta2** 一致，无新节点功能。多格分镜等说明见「版本与更新」。
 
 把上游 agent 产出的**中文 MOSS-Image 提示词草稿或散文式提示词**，在 ComfyUI 里可视化编辑、翻译成英文、按官方口径编译，直接接原生 MOSS-Image 节点生图。
 
@@ -28,7 +28,7 @@ Editor 的界面布局（LLM/姿势/服装双列面板、固定两行工具栏�
 
 ## 快速开始
 
-1. **安装**：把本目录放进 `ComfyUI/custom_nodes/`，重启 ComfyUI。插件不新增第三方依赖：HTTP/图像处理使用 ComfyUI 自带的 aiohttp / Pillow / numpy。
+1. **安装**：把本目录放进 `ComfyUI/custom_nodes/`，重启 ComfyUI。也可通过 ComfyUI Manager / Registry 安装：`comfy node install moss-prompt-studio`。插件不新增第三方依赖：HTTP/图像处理使用 ComfyUI 自带的 aiohttp / Pillow / numpy。
 2. **配置模型**：复制 `config.example.json` 为 `config.json`，按 provider 填 `base_url`/`model`/`api_key`；也可直接在节点 widget 填（节点值优先）。
 3. **主链接线**：`Editor.draft → Translator.draft → Compiler.draft → CLIPTextEncode/采样器`。caption 形态把 Editor 的 `width`/`height` 接 Compiler 的 `canvas_width`/`canvas_height`（推荐工作流已接好）。
 4. **文字输入**：把中文散文或 layout 草稿贴进 **Editor** 的 `source`；散文点 **⚡拆解** 生成画布，layout 草稿会直接识别。
@@ -253,6 +253,7 @@ node --test tests/*.test.mjs  # 140 用例（glob 自动包含所有前端测试
 
 ## 版本与更新
 
+- **v1.10.0-beta3** **Registry 打包**：仅增加 Comfy Registry 发布元数据（`pyproject.toml`、`.comfyignore`、手动 `workflow_dispatch` 发布工作流）。节点行为与 v1.10.0-beta2 一致，无新节点功能。
 - **v1.10.0-beta2** **多格分镜**：检查器 summary 区 canvas 下拉（single/multi_panel，始终可见；collage 未实验不提供）；📐模板 新增「条漫 1×3」（1024×1536）与「角色三视图」（1536×1024），「四格分镜」本就是 multi_panel；⚡拆解/⚡反推 产物固定 single——多格模式回退时状态行提示；multi_panel 下 📥姿势/📥服装 **自动分配禁用**（跨格左右/面积分配语义错误；选中注入、🔄对调、⤢改稿 不受影响，同格双人可切 single 注入后切回、姿势分段无损）；README 新增多格分镜 step-by-step。**修复**：改稿 LLM 偶发漏 reason 字段导致空提案卡（自动补全，不再整卡拒收；指纹/scope/未知字段严格拒收不变）。官方 multi_panel 字段经三条件对照实验（multi_panel vs [PANEL n] vs 纯空间措辞）与真机出图验证。测试 Python **148** / Node **141**。
 - **v1.10.0-beta** **AI 定向改稿**（P1a 全量）：Editor 新增 ⤢改稿 + 审批卡（词级 diff/🔒锁定画面文字/lint/采纳带回滚/撤销）；LLM 只产 ops（7 种操作 + target 指纹核验 + scope），未被 op 引用的条目逐字节不动；`ui.mps_ops` 独立通道防版本偏斜；双 sig 锚定防在飞手改碾压；headless 自动应用（`edit_request`+`apply_edit=-2`）；agents/revision-example.md 示例指令；反推 canvas 写回后引导直接改稿。**契约加固**：官方编译器 vendor 差分（`tests/vendor/compile_prompt_official.py` + 300 例固定种子 fuzz 逐字节一致）+ 编译 item 键序对齐官方；拆解提示词补 3 条官方写作规则（一段文字一个 item/知识图实内容/海报层级）；text_fit 补官方处置口径。**修复**：旧工作流 apply_edit 错位 400（前端归一+后端兜底）、锁文字被全部采纳绕过（B1）、mps_ops 双投递重复开卡（B2）。示例工作流清除失效 base_url/model（401 陷阱）。测试 Python **145** / Node **140**；六轮验证（单测→双 ponytail 审查→真机交互→嵌入缝隙→全链路出图+视觉确认→终审 GAP 闭环）。
 - **v1.9.2**：修复画布手调在防抖窗口内 Queue 被静默回滚的问题（翻译节点因此拿不到最新 JSON 的根因；注入前会先采纳防抖窗口内的手改）；新增工具栏 **⤓提交** 按钮——一键把当前画布冲进 edits 并体检（元素盘点/全局描述字数/尺寸/官方校验/文字容量与 token/归属签名）。Python **120** / Node **131**。
