@@ -12,6 +12,6 @@ Repository = "https://github.com/rabbitANDtank/comfyui-moss-prompt-studio"
 "Bug Tracker" = "https://github.com/rabbitANDtank/comfyui-moss-prompt-studio/issues"
 
 [tool.comfy]
-PublisherId = "rabbitANDtank"
+PublisherId = "rabbittank"
 DisplayName = "MOSS Prompt Studio"
 requires-comfyui = ">=0.43.0"
